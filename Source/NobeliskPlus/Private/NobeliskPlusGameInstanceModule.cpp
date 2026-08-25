@@ -1,13 +1,20 @@
 #include "NobeliskPlusGameInstanceModule.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Configuration/ConfigManager.h"
 #include "Configuration/Properties/ConfigPropertyFloat.h"
 #include "Configuration/Properties/ConfigPropertySection.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "DamageTypes/FGDamageType.h"
+#include "Materials/MaterialInterface.h"
 #include "Equipment/FGWeapon.h"
+#include "FGProjectileMovementComponent.h"
 #include "NobeliskPlus.h"
 #include "NobeliskPlusConfiguration.h"
 #include "NiagaraSystem.h"
@@ -32,6 +39,21 @@ constexpr const TCHAR* PulseRebarAmmoDescriptorPath =
 // The Rebar Gun doesn't accept every UFGAmmoType-derived item automatically - it whitelists
 // them explicitly on the equipment Blueprint (mAllowedAmmoClasses), which is why a new ammo
 // type otherwise never shows up as loadable, even with a valid recipe and MAM unlock.
+// BP_Rebar_Pulse was duplicated from BP_Rebar_Explosive, whose real parent is the shared
+// Blueprint BP_RebarProjectile (NOT AFGProjectile directly) - that base is where the rebar
+// mesh and trail live. The duplicate ended up parented straight at the native class, so it
+// carries its own copy of the "Rebar" StaticMeshComponent but with no mesh assigned, which is
+// why the round is invisible in flight. Assign the same mesh the shared base uses.
+// The magazine (the rounds visible loaded in the gun) is drawn with the ammo descriptor's
+// mMagazineMeshMaterials / mMagazineMeshMaterials1p. Duplicating Desc_Rebar_Explosive carried
+// its red-tipped explosive materials over. The Stun rebar's set is the blue/electric one,
+// which suits a "pulse" round and matches a cyan icon; swap to it.
+constexpr const TCHAR* PulseRebarMagazineMaterialPath =
+	TEXT("/Game/FactoryGame/Equipment/RebarGun/Material/MI_RebarStun_01.MI_RebarStun_01");
+constexpr const TCHAR* PulseRebarMagazineMaterial1pPath =
+	TEXT("/Game/FactoryGame/Equipment/RebarGun/Material/MI_RebarStun_01_1p.MI_RebarStun_01_1p");
+constexpr const TCHAR* RebarProjectileMeshPath =
+	TEXT("/Game/FactoryGame/Equipment/RebarGun/Mesh/Rebar_static_01.Rebar_static_01");
 constexpr const TCHAR* RebarGunEquipmentPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Equip_RebarGun_Projectile.Equip_RebarGun_Projectile_C");
 
@@ -118,14 +140,17 @@ void EnsureObjectTypesToAffectIncludesPlayer(URadialForceComponent& radialForce,
 	UE_LOG(LogNobeliskPlus, Log, TEXT("%s's RadialForceComponent did not affect Pawns (had %d object type(s) configured, none of them Pawn); replaced with Pawn/PhysicsBody/Vehicle/Destructible/WorldDynamic."), *projectilePath, previousNum);
 }
 
-// Scans actorClass's full native+Blueprint class hierarchy for any UParticleSystem asset
-// reference and returns the first non-null one found on the class default object. Used to
-// let the Pulse Rebar reuse whatever impact effect the vanilla Pulse Nobelisk uses, without
-// needing to know its exact property name - useful since BP_NobeliskShockwave's own
-// Blueprint graph has no VFX references at all, meaning the effect is set up natively in
-// code this project does not have source access to; if it lives on a reflected UPROPERTY
-// anywhere in the chain (native or Blueprint), this finds it regardless.
-UParticleSystem* FindParticleSystemPropertyValue(UClass* actorClass)
+// Scans actorClass's full native+Blueprint class hierarchy for any object property whose
+// declared type derives from assetBaseClass, and returns the first non-null value found on
+// the class default object. Used to let the Pulse Rebar reuse whatever impact effect the
+// vanilla Pulse Nobelisk uses, without needing to know its exact property name - useful
+// since BP_NobeliskShockwave's own Blueprint graph has no VFX references at all, meaning the
+// effect is set up natively in code this project does not have source access to; if it lives
+// on a reflected UPROPERTY anywhere in the chain (native or Blueprint), this finds it
+// regardless. Checked for both UParticleSystem (legacy Cascade) and UNiagaraSystem, since
+// this project has both integrated and it isn't obvious from the outside which one a given
+// effect actually uses.
+UObject* FindAssetPropertyValue(UClass* actorClass, UClass* assetBaseClass)
 {
 	UObject* cdo = actorClass->GetDefaultObject();
 	for (UClass* cls = actorClass; cls != nullptr; cls = cls->GetSuperClass())
@@ -133,18 +158,276 @@ UParticleSystem* FindParticleSystemPropertyValue(UClass* actorClass)
 		for (TFieldIterator<FObjectProperty> propIt(cls, EFieldIteratorFlags::ExcludeSuper); propIt; ++propIt)
 		{
 			FObjectProperty* prop = *propIt;
-			if (prop->PropertyClass == nullptr || !prop->PropertyClass->IsChildOf(UParticleSystem::StaticClass()))
+			if (prop->PropertyClass == nullptr || !prop->PropertyClass->IsChildOf(assetBaseClass))
 				continue;
 
 			if (UObject* value = prop->GetObjectPropertyValue_InContainer(cdo))
 			{
-				UE_LOG(LogNobeliskPlus, Log, TEXT("Found particle system property %s::%s = %s"), *cls->GetName(), *prop->GetName(), *value->GetPathName());
-				return Cast<UParticleSystem>(value);
+				UE_LOG(LogNobeliskPlus, Log, TEXT("Found %s property %s::%s = %s"), *assetBaseClass->GetName(), *cls->GetName(), *prop->GetName(), *value->GetPathName());
+				return value;
 			}
 		}
 	}
 	return nullptr;
 }
+
+// The Pulse Nobelisk's explosion visual is not stored in any property - not on the projectile
+// CDO, not on its damage types, not on the ammo descriptor (all checked). It is spawned by
+// Blueprint graph logic (AFGProjectile::PlayExplosionEffects is a BlueprintImplementableEvent),
+// which reflection cannot see because an asset referenced only from graph bytecode never
+// appears as a UPROPERTY value.
+//
+// It IS recorded as a package dependency though, so ask the asset registry what
+// BP_NobeliskShockwave's package pulls in and pick the VFX asset out of that. Walks one level
+// of indirection as well, since the effect is often referenced via an intermediate Blueprint.
+// Prefers a name containing "shock" when several candidates exist, so we get the shockwave
+// rather than some unrelated smoke/debris system that happens to be referenced too.
+// Assets referenced only from Blueprint *graph* nodes are not property values, so no
+// reflection scan of the CDO can ever see them. They are however recorded in the compiled
+// function bytecode, and UStruct::ScriptAndPropertyObjectReferences mirrors exactly those
+// object references (it exists so GC can keep them alive). Scanning it finds assets used by
+// graph logic such as AFGProjectile::PlayExplosionEffects.
+//
+// This works in a shipped build, unlike asset-registry dependency queries: cooked builds
+// strip dependency data from the runtime asset registry, so that approach silently returns
+// nothing in the actual game even though it works fine in the editor.
+// Same bytecode trick as FindEffectAssetInBytecode, but matched on a class NAME so we can
+// look for AkAudioEvent without taking a hard dependency on the AkAudio module.
+//
+// A destructive projectile's bytecode references MULTIPLE events of the same class - e.g.
+// AFGDestructiveProjectile fires a different Wwise event per destroyed-surface type (rock,
+// foliage, metal...) as well as its own detonation. Taking the first match found
+// "Play_Nobelisk_WorldDestruction_SmallRock" instead of the actual explosion sound. Collect
+// every match instead and pick by name.
+UObject* FindBytecodeReferenceByClassName(UClass* blueprintClass, const TCHAR* wantedClassName, TFunctionRef<bool(const FString&)> isPreferredName)
+{
+	TArray<UObject*> candidates;
+
+	for (UClass* cls = blueprintClass; cls != nullptr; cls = cls->GetSuperClass())
+	{
+		auto scan = [wantedClassName, &candidates](const UStruct* target)
+		{
+			if (target == nullptr)
+				return;
+			for (const TObjectPtr<UObject>& reference : target->ScriptAndPropertyObjectReferences)
+			{
+				UObject* object = reference.Get();
+				if (object != nullptr && object->GetClass()->GetName() == wantedClassName)
+					candidates.AddUnique(object);
+			}
+		};
+
+		scan(cls);
+		for (TFieldIterator<UFunction> functionIt(cls, EFieldIteratorFlags::ExcludeSuper); functionIt; ++functionIt)
+		{
+			scan(*functionIt);
+		}
+	}
+
+	if (candidates.IsEmpty())
+		return nullptr;
+
+	for (const UObject* candidate : candidates)
+	{
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Bytecode-referenced %s candidate: %s"), wantedClassName, *candidate->GetPathName());
+	}
+
+	UObject** preferred = candidates.FindByPredicate([&isPreferredName](const UObject* candidate)
+	{
+		return isPreferredName(candidate->GetName());
+	});
+	return preferred != nullptr ? *preferred : candidates[0];
+}
+
+UObject* FindEffectAssetInBytecode(UClass* blueprintClass)
+{
+	TArray<UObject*> candidates;
+	// Diagnostic: if no effect turns up, this tells us what the bytecode DOES reference,
+	// rather than leaving us to guess why the scan came back empty.
+	TSet<FString> referencedClassNames;
+	int32 totalReferences = 0;
+
+	auto scanStruct = [&candidates, &referencedClassNames, &totalReferences](const UStruct* target)
+	{
+		if (target == nullptr)
+			return;
+		for (const TObjectPtr<UObject>& reference : target->ScriptAndPropertyObjectReferences)
+		{
+			UObject* object = reference.Get();
+			if (object == nullptr)
+				continue;
+			++totalReferences;
+			referencedClassNames.Add(object->GetClass()->GetName());
+			if (object->IsA<UNiagaraSystem>() || object->IsA<UParticleSystem>())
+			{
+				candidates.AddUnique(object);
+			}
+		}
+	};
+
+	for (UClass* cls = blueprintClass; cls != nullptr; cls = cls->GetSuperClass())
+	{
+		scanStruct(cls);
+		for (TFieldIterator<UFunction> functionIt(cls, EFieldIteratorFlags::ExcludeSuper); functionIt; ++functionIt)
+		{
+			scanStruct(*functionIt);
+		}
+	}
+
+	if (candidates.IsEmpty())
+	{
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Bytecode scan of %s found %d object reference(s) but no particle/Niagara system. Referenced types were: %s"),
+			*blueprintClass->GetName(), totalReferences, *FString::Join(referencedClassNames.Array(), TEXT(", ")));
+		return nullptr;
+	}
+
+	for (const UObject* candidate : candidates)
+	{
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Bytecode-referenced effect candidate: %s (%s)"), *candidate->GetPathName(), *candidate->GetClass()->GetName());
+	}
+
+	UObject** preferred = candidates.FindByPredicate([](const UObject* candidate)
+	{
+		return candidate->GetName().Contains(TEXT("shock"));
+	});
+	return preferred != nullptr ? *preferred : candidates[0];
+}
+
+UObject* FindEffectAssetViaDependencies(const TCHAR* rootPackageName)
+{
+	const FAssetRegistryModule& assetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	const IAssetRegistry& assetRegistry = assetRegistryModule.Get();
+
+	const FTopLevelAssetPath niagaraClassPath = UNiagaraSystem::StaticClass()->GetClassPathName();
+	const FTopLevelAssetPath particleClassPath = UParticleSystem::StaticClass()->GetClassPathName();
+
+	TSet<FName> visited;
+	TArray<FName> frontier;
+	frontier.Add(FName(rootPackageName));
+
+	TArray<FAssetData> candidates;
+
+	constexpr int32 maxDepth = 2;
+	for (int32 depth = 0; depth < maxDepth && frontier.Num() > 0; ++depth)
+	{
+		TArray<FName> nextFrontier;
+		for (const FName& packageName : frontier)
+		{
+			bool alreadyVisited = false;
+			visited.Add(packageName, &alreadyVisited);
+			if (alreadyVisited)
+				continue;
+
+			TArray<FName> dependencies;
+			assetRegistry.GetDependencies(packageName, dependencies);
+			for (const FName& dependency : dependencies)
+			{
+				TArray<FAssetData> assets;
+				assetRegistry.GetAssetsByPackageName(dependency, assets);
+				for (const FAssetData& asset : assets)
+				{
+					if (asset.AssetClassPath == niagaraClassPath || asset.AssetClassPath == particleClassPath)
+					{
+						candidates.Add(asset);
+					}
+				}
+				nextFrontier.Add(dependency);
+			}
+		}
+		frontier = MoveTemp(nextFrontier);
+	}
+
+	if (candidates.IsEmpty())
+		return nullptr;
+
+	for (const FAssetData& candidate : candidates)
+	{
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Candidate impact effect: %s (%s)"), *candidate.GetSoftObjectPath().ToString(), *candidate.AssetClassPath.ToString());
+	}
+
+	const FAssetData* chosen = candidates.FindByPredicate([](const FAssetData& asset)
+	{
+		return asset.AssetName.ToString().Contains(TEXT("shock"));
+	});
+	if (chosen == nullptr)
+	{
+		chosen = &candidates[0];
+	}
+
+	return chosen->GetAsset();
+}
+
+// Replaces every entry of the descriptor's magazine material arrays. mMagazineMeshMaterials
+// is TArray<FSkeletalMaterial> (a struct wrapper, so we reach into its MaterialInterface
+// member) while mMagazineMeshMaterials1p is a plain object array - both are protected, hence
+// reflection.
+void SetMagazineMaterials(UClass* ammoClass, UObject* ammoCdo)
+{
+	UMaterialInterface* material = LoadObject<UMaterialInterface>(nullptr, PulseRebarMagazineMaterialPath);
+	UMaterialInterface* material1p = LoadObject<UMaterialInterface>(nullptr, PulseRebarMagazineMaterial1pPath);
+	if (material == nullptr && material1p == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Warning, TEXT("Could not load the Pulse Rebar magazine materials; the loaded round will keep the explosive rebar's red look."));
+		return;
+	}
+
+	if (FArrayProperty* skeletalMaterialsProp = CastField<FArrayProperty>(ammoClass->FindPropertyByName(TEXT("mMagazineMeshMaterials"))))
+	{
+		if (FStructProperty* elementProp = CastField<FStructProperty>(skeletalMaterialsProp->Inner))
+		{
+			if (FObjectProperty* materialProp = CastField<FObjectProperty>(elementProp->Struct->FindPropertyByName(TEXT("MaterialInterface"))))
+			{
+				FScriptArrayHelper helper(skeletalMaterialsProp, skeletalMaterialsProp->ContainerPtrToValuePtr<void>(ammoCdo));
+				for (int32 index = 0; index < helper.Num(); ++index)
+				{
+					materialProp->SetObjectPropertyValue(materialProp->ContainerPtrToValuePtr<void>(helper.GetRawPtr(index)), material);
+				}
+				UE_LOG(LogNobeliskPlus, Log, TEXT("Set %d magazine material slot(s) to %s."), helper.Num(), PulseRebarMagazineMaterialPath);
+			}
+		}
+	}
+
+	if (FArrayProperty* materials1pProp = CastField<FArrayProperty>(ammoClass->FindPropertyByName(TEXT("mMagazineMeshMaterials1p"))))
+	{
+		if (FObjectProperty* elementProp = CastField<FObjectProperty>(materials1pProp->Inner))
+		{
+			FScriptArrayHelper helper(materials1pProp, materials1pProp->ContainerPtrToValuePtr<void>(ammoCdo));
+			for (int32 index = 0; index < helper.Num(); ++index)
+			{
+				elementProp->SetObjectPropertyValue(helper.GetRawPtr(index), material1p);
+			}
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Set %d first-person magazine material slot(s) to %s."), helper.Num(), PulseRebarMagazineMaterial1pPath);
+		}
+	}
+}
+
+void EnsureProjectileMeshAssigned(UClass* actorClass, const FString& projectilePath)
+{
+	// ANobeliskPlusPulseRebarProjectile creates RebarMesh as a native default subobject, so
+	// unlike a Blueprint SCS component it genuinely exists on the CDO and can be found here.
+	AActor* cdo = Cast<AActor>(actorClass->GetDefaultObject());
+	UStaticMeshComponent* meshComponent = cdo != nullptr ? cdo->FindComponentByClass<UStaticMeshComponent>() : nullptr;
+	if (meshComponent == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Warning, TEXT("%s has no StaticMeshComponent; the round will be invisible in flight."), *projectilePath);
+		return;
+	}
+
+	if (meshComponent->GetStaticMesh() != nullptr)
+		return;
+
+	UStaticMesh* mesh = LoadObject<UStaticMesh>(nullptr, RebarProjectileMeshPath);
+	if (mesh == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load %s; the Pulse Rebar will stay invisible in flight."), RebarProjectileMeshPath);
+		return;
+	}
+
+	meshComponent->SetStaticMesh(mesh);
+	UE_LOG(LogNobeliskPlus, Log, TEXT("Assigned %s to %s's %s so the round is visible in flight."),
+		*mesh->GetName(), *projectilePath, *meshComponent->GetName());
+}
+
 } // namespace
 
 UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
@@ -193,14 +476,42 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 
 	{
 		UClass* nobeliskClass = StaticLoadClass(AActor::StaticClass(), nullptr, PulseNobeliskProjectilePath);
-		ANobeliskPlusPulseRebarProjectile::ImpactEffect = nobeliskClass != nullptr ? FindParticleSystemPropertyValue(nobeliskClass) : nullptr;
-		if (ANobeliskPlusPulseRebarProjectile::ImpactEffect != nullptr)
+		ANobeliskPlusPulseRebarProjectile::ImpactEffect = nullptr;
+		ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = nullptr;
+		if (nobeliskClass != nullptr)
 		{
-			UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Rebar will reuse the Pulse Nobelisk's impact particle system."));
+			ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = Cast<UNiagaraSystem>(FindAssetPropertyValue(nobeliskClass, UNiagaraSystem::StaticClass()));
+			if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect == nullptr)
+			{
+				ANobeliskPlusPulseRebarProjectile::ImpactEffect = Cast<UParticleSystem>(FindAssetPropertyValue(nobeliskClass, UParticleSystem::StaticClass()));
+			}
+		}
+
+		// The property scan only sees assets held in UPROPERTY fields. The Nobelisk's explosion
+		// visual is spawned from Blueprint graph logic instead, so fall back to asking the asset
+		// registry what its package actually depends on.
+		if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect == nullptr && ANobeliskPlusPulseRebarProjectile::ImpactEffect == nullptr)
+		{
+			UObject* effect = nobeliskClass != nullptr ? FindEffectAssetInBytecode(nobeliskClass) : nullptr;
+			if (effect == nullptr)
+			{
+				effect = FindEffectAssetViaDependencies(TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/BP_NobeliskShockwave"));
+			}
+			ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = Cast<UNiagaraSystem>(effect);
+			ANobeliskPlusPulseRebarProjectile::ImpactEffect = Cast<UParticleSystem>(effect);
+			if (effect != nullptr)
+			{
+				UE_LOG(LogNobeliskPlus, Log, TEXT("Found impact effect via package dependencies: %s"), *effect->GetPathName());
+			}
+		}
+
+		if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect != nullptr || ANobeliskPlusPulseRebarProjectile::ImpactEffect != nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Rebar will reuse the Pulse Nobelisk's impact %s system."), ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect != nullptr ? TEXT("Niagara") : TEXT("particle"));
 		}
 		else
 		{
-			UE_LOG(LogNobeliskPlus, Log, TEXT("Could not find any particle system asset reference on the Pulse Nobelisk's class hierarchy - it is likely spawned natively in code this project does not have source for. The Pulse Rebar's impact will have no VFX."));
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Could not find any particle/Niagara system asset reference on the Pulse Nobelisk's class hierarchy - it is likely spawned natively in code this project does not have source for. The Pulse Rebar's impact will have no VFX."));
 		}
 	}
 }
@@ -270,7 +581,30 @@ void UNobeliskPlusGameInstanceModule::SetUpShockwaveTarget(FNobeliskPlusShockwav
 	target.ImpulseMultiplierProperty = FindMultiplierProperty(section, TEXT("ImpulseMultiplier"));
 	target.ForceMultiplierProperty = FindMultiplierProperty(section, TEXT("ForceMultiplier"));
 
-	for (UConfigPropertyFloat* property : {target.RadiusMultiplierProperty, target.ImpulseMultiplierProperty, target.ForceMultiplierProperty})
+	// Muzzle velocity lives on the projectile's own movement component; the Pulse Rebar's
+	// ammo descriptor leaves mInitialProjectileSpeedOverride unset, so nothing downstream
+	// overwrites what we set here at fire time.
+	if (target.bDrivesNativePulse)
+	{
+		if (AFGProjectile* projectileCdo = Cast<AFGProjectile>(projectileClass->GetDefaultObject()))
+		{
+			target.ProjectileMovement = projectileCdo->GetProjectileMovement();
+			if (target.ProjectileMovement != nullptr)
+			{
+				target.BaseInitialSpeed = target.ProjectileMovement->InitialSpeed;
+				target.BaseMaxSpeed = target.ProjectileMovement->MaxSpeed;
+				CDOEdits.Add(target.ProjectileMovement);
+			}
+			else
+			{
+				UE_LOG(LogNobeliskPlus, Warning, TEXT("%s has no projectile movement component; its speed will not be adjustable."), *target.ProjectilePath);
+			}
+		}
+		target.SpeedMultiplierProperty = FindMultiplierProperty(section, TEXT("SpeedMultiplier"));
+		EnsureProjectileMeshAssigned(projectileClass, target.ProjectilePath);
+	}
+
+	for (UConfigPropertyFloat* property : {target.RadiusMultiplierProperty, target.ImpulseMultiplierProperty, target.ForceMultiplierProperty, target.SpeedMultiplierProperty})
 	{
 		if (property != nullptr)
 		{
@@ -307,6 +641,20 @@ void UNobeliskPlusGameInstanceModule::ApplyShockwaveTarget(const FNobeliskPlusSh
 	target.RadialForce->ImpulseStrength = target.BaseImpulseStrength * impulseMultiplier;
 	target.RadialForce->ForceStrength = target.BaseForceStrength * forceMultiplier;
 
+	if (target.ProjectileMovement != nullptr)
+	{
+		const float speedMultiplier = target.SpeedMultiplierProperty ? target.SpeedMultiplierProperty->Value : 1.0f;
+		target.ProjectileMovement->InitialSpeed = target.BaseInitialSpeed * speedMultiplier;
+		// MaxSpeed clamps velocity, so it has to rise with InitialSpeed or the multiplier is
+		// silently capped. A base MaxSpeed of 0 means "no limit" - leave that alone.
+		target.ProjectileMovement->MaxSpeed = target.BaseMaxSpeed > 0.0f ? target.BaseMaxSpeed * speedMultiplier : 0.0f;
+
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Applying projectile speed for %s: initial %.0f -> %.0f, max %.0f -> %.0f"),
+			*target.ProjectilePath,
+			target.BaseInitialSpeed, target.ProjectileMovement->InitialSpeed,
+			target.BaseMaxSpeed, target.ProjectileMovement->MaxSpeed);
+	}
+
 	if (target.bDrivesNativePulse)
 	{
 		// The Blueprint's RadialForceComponent is left configured above for physics debris,
@@ -327,10 +675,12 @@ void UNobeliskPlusGameInstanceModule::ClearPulseRebarAmmoDamage() const
 	// clearing them on BP_Rebar_Pulse was always a no-op. The damage types actually live on
 	// the AMMO DESCRIPTOR (UFGAmmoType::mDamageTypesOnImpact and
 	// UFGAmmoTypeProjectile::mDamageTypesAtEndOfLife) and are pushed onto each spawned
-	// projectile at fire time via SetupProjectile/SetImpactDamageTypes. Desc_Rebar_Pulse
-	// inherited BP_PointDamageType_Physical + BP_RadialDamageType_Explosive from the
-	// duplicated Desc_Rebar_Explosive, which is why the Pulse Rebar still hurt.
-	// Both properties are protected, so they are cleared through reflection.
+	// projectile at fire time via SetupProjectile/SetImpactDamageTypes.
+	//
+	// Do NOT empty those arrays: a UFGDamageType also carries mImpactAudioEvent and
+	// mImpactParticle, so deleting the entries silently removes the impact SOUND and VFX
+	// along with the damage. Zero mDamageAmount on each instance instead - the round then
+	// hits for nothing while still looking and sounding like an impact.
 	UClass* ammoClass = StaticLoadClass(UObject::StaticClass(), nullptr, PulseRebarAmmoDescriptorPath);
 	if (ammoClass == nullptr)
 	{
@@ -339,6 +689,21 @@ void UNobeliskPlusGameInstanceModule::ClearPulseRebarAmmoDamage() const
 	}
 
 	UObject* ammoCdo = ammoClass->GetDefaultObject();
+	SetMagazineMaterials(ammoClass, ammoCdo);
+
+	UObject* nobeliskImpactAudio = nullptr;
+	if (UClass* nobeliskClass = StaticLoadClass(AActor::StaticClass(), nullptr, PulseNobeliskProjectilePath))
+	{
+		nobeliskImpactAudio = FindBytecodeReferenceByClassName(nobeliskClass, TEXT("AkAudioEvent"), [](const FString& name)
+		{
+			return name.Contains(TEXT("Shockwave")) || name.Contains(TEXT("Detonat")) || name.Contains(TEXT("Explo"));
+		});
+	}
+	if (nobeliskImpactAudio == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Warning, TEXT("Could not find a Wwise event in the Pulse Nobelisk's bytecode; the Pulse Rebar keeps the explosive rebar's impact sound."));
+	}
+
 	for (const TCHAR* propertyName : {TEXT("mDamageTypesOnImpact"), TEXT("mDamageTypesAtEndOfLife")})
 	{
 		FArrayProperty* damageTypesProp = CastField<FArrayProperty>(ammoClass->FindPropertyByName(propertyName));
@@ -348,12 +713,37 @@ void UNobeliskPlusGameInstanceModule::ClearPulseRebarAmmoDamage() const
 			continue;
 		}
 
-		FScriptArrayHelper arrayHelper(damageTypesProp, damageTypesProp->ContainerPtrToValuePtr<void>(ammoCdo));
-		const int32 previousNum = arrayHelper.Num();
-		if (previousNum == 0)
+		FObjectProperty* elementProp = CastField<FObjectProperty>(damageTypesProp->Inner);
+		if (elementProp == nullptr)
 			continue;
 
-		arrayHelper.EmptyValues();
-		UE_LOG(LogNobeliskPlus, Log, TEXT("Cleared %d damage type(s) from the Pulse Rebar ammo descriptor's %s; it is now push-only."), previousNum, propertyName);
+		FScriptArrayHelper arrayHelper(damageTypesProp, damageTypesProp->ContainerPtrToValuePtr<void>(ammoCdo));
+		for (int32 index = 0; index < arrayHelper.Num(); ++index)
+		{
+			UFGDamageType* damageType = Cast<UFGDamageType>(elementProp->GetObjectPropertyValue(arrayHelper.GetRawPtr(index)));
+			if (damageType == nullptr)
+				continue;
+
+			const float previousDamage = damageType->mDamageAmount;
+			damageType->mDamageAmount = 0.0f;
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Rebar %s[%d] (%s): damage %.1f -> 0 (impact audio/VFX left intact)."),
+				propertyName, index, *damageType->GetClass()->GetName(), previousDamage);
+
+			// The inherited audio is the explosive rebar's bang. Point it at whatever Wwise
+			// event the Pulse Nobelisk's own Blueprint posts, so the round sounds like a
+			// shockwave rather than an explosion. mImpactAudioEvent is a TSoftObjectPtr, so
+			// it is written through reflection as a soft path - that also avoids needing the
+			// AkAudio module just to name the type.
+			if (nobeliskImpactAudio != nullptr)
+			{
+				if (FSoftObjectProperty* audioProp = CastField<FSoftObjectProperty>(
+					damageType->GetClass()->FindPropertyByName(TEXT("mImpactAudioEvent"))))
+				{
+					FSoftObjectPtr newValue(nobeliskImpactAudio);
+					audioProp->SetPropertyValue_InContainer(damageType, newValue);
+					UE_LOG(LogNobeliskPlus, Log, TEXT("  impact audio -> %s"), *nobeliskImpactAudio->GetPathName());
+				}
+			}
+		}
 	}
 }

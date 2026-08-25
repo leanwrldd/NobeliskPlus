@@ -1,6 +1,8 @@
 #include "NobeliskPlusPulseRebarProjectile.h"
 
 #include "Engine/OverlapResult.h"
+#include "Components/StaticMeshComponent.h"
+#include "Creature/FGCreature.h"
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "NobeliskPlus.h"
@@ -13,8 +15,26 @@
 float ANobeliskPlusPulseRebarProjectile::PulseRadius = 500.0f;
 float ANobeliskPlusPulseRebarProjectile::PulseLaunchVelocity = 1200.0f;
 float ANobeliskPlusPulseRebarProjectile::PulsePhysicsImpulse = 120000.0f;
+float ANobeliskPlusPulseRebarProjectile::PulseStunDuration = 1.0f;
 UParticleSystem* ANobeliskPlusPulseRebarProjectile::ImpactEffect = nullptr;
 UNiagaraSystem* ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = nullptr;
+
+ANobeliskPlusPulseRebarProjectile::ANobeliskPlusPulseRebarProjectile()
+{
+	RebarMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("RebarMesh"));
+	// Purely visual - the projectile already has its own collision sphere from AFGProjectile,
+	// and a second colliding body would make the round hit things twice.
+	RebarMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	RebarMesh->SetGenerateOverlapEvents(false);
+	if (RootComponent != nullptr)
+	{
+		RebarMesh->SetupAttachment(RootComponent);
+	}
+	else
+	{
+		RootComponent = RebarMesh;
+	}
+}
 
 void ANobeliskPlusPulseRebarProjectile::OnImpact_Native(const FHitResult& hitResult)
 {
@@ -100,10 +120,24 @@ void ANobeliskPlusPulseRebarProjectile::ApplyPulse(const FVector& origin)
 			FVector direction = distance > KINDA_SMALL_NUMBER ? delta / distance : FVector::UpVector;
 			direction = (direction + FVector(0.0f, 0.0f, 0.75f)).GetSafeNormal();
 
+			// Creatures are AI-driven: UFGCreatureMovementComponent re-drives velocity from
+			// pathfinding every tick, so a launch alone gets overwritten almost immediately
+			// and they appear unaffected. Stunning them briefly suspends that so the launch
+			// actually carries.
+			if (AFGCreature* creature = Cast<AFGCreature>(character))
+			{
+				if (creature->CanBeStunned())
+				{
+					creature->BeginStun(PulseStunDuration);
+				}
+			}
+
 			// LaunchCharacter takes a VELOCITY (cm/s), not an impulse - feeding it a
 			// RadialForceComponent-style impulse number would be nonsense.
 			character->LaunchCharacter(direction * PulseLaunchVelocity * falloff, true, true);
 			++charactersPushed;
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse pushed character %s (%s) at %.0fcm, falloff %.2f"),
+				*character->GetName(), *character->GetClass()->GetName(), distance, falloff);
 			continue;
 		}
 
@@ -115,7 +149,7 @@ void ANobeliskPlusPulseRebarProjectile::ApplyPulse(const FVector& origin)
 		}
 	}
 
-	UE_LOG(LogNobeliskPlus, Verbose,
+	UE_LOG(LogNobeliskPlus, Log,
 		TEXT("Pulse Rebar shockwave at %s: radius %.0f, launch velocity %.0f, physics impulse %.0f -> pushed %d character(s), %d physics body/bodies."),
 		*origin.ToCompactString(), radius, PulseLaunchVelocity, PulsePhysicsImpulse, charactersPushed, bodiesPushed);
 }

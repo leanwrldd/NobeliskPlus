@@ -59,13 +59,17 @@ UConfigPropertyFloat* AddMultiplierProperty(
 	property->WidgetType = ECP_FloatWidgetType::CPF_Spinbox;
 	property->MinValue = 0.0f;
 	property->MaxValue = 10.0f;
+	// Defaults to true on the Blueprint property classes, which locks editing to the main
+	// menu only - the whole point of this config is live in-session tuning (values are
+	// reapplied immediately via OnPropertyValueChanged), so it must be explicitly cleared.
+	property->bRequiresWorldReload = false;
 	section->SectionProperties.Add(name.ToString(), property);
 	return property;
 }
 
 /// Adds a "Radius/Impulse/Force Multiplier" trio to the given section, prefixed by the
 /// given weapon name (e.g. "Pulse Nobelisk"), and returns the trio's own subsection.
-UConfigPropertySection* AddShockwaveSection(UConfigPropertySection* parent, FName name, const TCHAR* weaponDisplayName)
+UConfigPropertySection* AddShockwaveSection(UConfigPropertySection* parent, FName name, const TCHAR* weaponDisplayName, bool includeProjectileSpeed)
 {
 	UCP_Section* section = NewObject<UCP_Section>(parent, GetConfigPropertySectionClass(), name);
 	section->DisplayName = FText::FromString(weaponDisplayName);
@@ -75,11 +79,17 @@ UConfigPropertySection* AddShockwaveSection(UConfigPropertySection* parent, FNam
 	parent->SectionProperties.Add(name.ToString(), section);
 
 	AddMultiplierProperty(section, TEXT("RadiusMultiplier"), TEXT("Shockwave Radius Multiplier"),
-		*FString::Printf(TEXT("How much bigger the %s's shockwave radius should be."), weaponDisplayName), 2.0f);
+		*FString::Printf(TEXT("How much bigger the %s's shockwave radius should be."), weaponDisplayName), 1.0f);
 	AddMultiplierProperty(section, TEXT("ImpulseMultiplier"), TEXT("Shockwave Impulse Multiplier"),
-		*FString::Printf(TEXT("How much stronger the %s's one-shot push should be."), weaponDisplayName), 2.0f);
+		*FString::Printf(TEXT("How much stronger the %s's one-shot push should be."), weaponDisplayName), 1.0f);
 	AddMultiplierProperty(section, TEXT("ForceMultiplier"), TEXT("Shockwave Force Multiplier"),
-		*FString::Printf(TEXT("How much stronger the %s's continuous push should be, for any part of the shockwave that isn't delivered as a single impulse."), weaponDisplayName), 2.0f);
+		*FString::Printf(TEXT("How much stronger the %s's continuous push should be, for any part of the shockwave that isn't delivered as a single impulse."), weaponDisplayName), 1.0f);
+
+	if (includeProjectileSpeed)
+	{
+		AddMultiplierProperty(section, TEXT("SpeedMultiplier"), TEXT("Projectile Speed Multiplier"),
+			*FString::Printf(TEXT("How much faster the %s travels after being fired. Raise this if the round feels slow to reach what you aimed at."), weaponDisplayName), 1.0f);
+	}
 
 	return section;
 }
@@ -91,12 +101,12 @@ UNobeliskPlusConfiguration::UNobeliskPlusConfiguration(const FObjectInitializer&
 	ConfigId.ModReference = TEXT("NobeliskPlus");
 	DisplayName = FText::FromString(TEXT("Nobelisk Plus"));
 	Description = FText::FromString(
-		TEXT("Tune how much bigger and stronger the Pulse Nobelisk's and Pulse Rebar's shockwaves are. Damage is not affected."));
+		TEXT("Tune how much bigger and stronger the Pulse Nobelisk's and Pulse Rebar's shockwaves are. Every setting defaults to 1.0, which is vanilla behaviour. Damage is not affected."));
 
 	UCP_Section* root = NewObject<UCP_Section>(this, GetConfigPropertySectionClass(), TEXT("RootSection"));
 	root->WidgetType = ECP_SectionWidgetType::CPS_Vertical;
 	RootSection = root;
 
-	AddShockwaveSection(root, TEXT("Nobelisk"), TEXT("Pulse Nobelisk"));
-	AddShockwaveSection(root, TEXT("Rebar"), TEXT("Pulse Rebar"));
+	AddShockwaveSection(root, TEXT("Nobelisk"), TEXT("Pulse Nobelisk"), /* includeProjectileSpeed */ false);
+	AddShockwaveSection(root, TEXT("Rebar"), TEXT("Pulse Rebar"), /* includeProjectileSpeed */ true);
 }

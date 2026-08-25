@@ -4,6 +4,7 @@
 #include "FGProjectile.h"
 class UParticleSystem;
 class UNiagaraSystem;
+class UStaticMeshComponent;
 #include "NobeliskPlusPulseRebarProjectile.generated.h"
 
 /// Projectile for the Pulse Rebar.
@@ -25,12 +26,25 @@ class NOBELISKPLUS_API ANobeliskPlusPulseRebarProjectile : public AFGProjectile
 	GENERATED_BODY()
 
 public:
+	ANobeliskPlusPulseRebarProjectile();
+
+	/// The visible rebar in flight. Reparenting BP_Rebar_Pulse onto this class detached it
+	/// from BP_RebarProjectile (the shared Blueprint base all vanilla rebar rounds derive
+	/// from), which is where the mesh component lived - so the round rendered as nothing at
+	/// all. Recreated natively here instead of relying on the Blueprint carrying one.
+	UPROPERTY(VisibleAnywhere, Category = "Pulse Rebar")
+	TObjectPtr<UStaticMeshComponent> RebarMesh;
+
 	/// Live values, pushed here by UNobeliskPlusGameInstanceModule whenever the mod's
 	/// configuration changes. Static because the projectile is spawned per shot and has no
 	/// convenient route back to the module.
 	static float PulseRadius;
 	static float PulseLaunchVelocity;
 	static float PulsePhysicsImpulse;
+
+	/// Seconds of stun applied to creatures so their AI movement doesn't immediately cancel
+	/// the launch. Does not apply to the player.
+	static float PulseStunDuration;
 
 	/// Discovered once at startup by scanning BP_NobeliskShockwave_C's class hierarchy for
 	/// any UParticleSystem/UNiagaraSystem asset reference - see

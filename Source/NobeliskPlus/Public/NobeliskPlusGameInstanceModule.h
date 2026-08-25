@@ -7,6 +7,7 @@
 class UConfigPropertyFloat;
 class UConfigPropertySection;
 class URadialForceComponent;
+class UFGProjectileMovementComponent;
 
 /// One shockwave-producing projectile whose RadialForceComponent is amplified by a
 /// trio of config-driven multipliers ("Radius/Impulse/ForceMultiplier" under the given
@@ -44,6 +45,17 @@ struct FNobeliskPlusShockwaveTarget
 
 	UPROPERTY()
 	TObjectPtr<UConfigPropertyFloat> ForceMultiplierProperty;
+
+	/// Only set for targets that drive a gun-fired projectile (the Pulse Rebar). The Pulse
+	/// Nobelisk is thrown, so a muzzle-velocity setting would be meaningless for it.
+	UPROPERTY()
+	TObjectPtr<UConfigPropertyFloat> SpeedMultiplierProperty;
+
+	UPROPERTY()
+	TObjectPtr<UFGProjectileMovementComponent> ProjectileMovement;
+
+	float BaseInitialSpeed = 0.0f;
+	float BaseMaxSpeed = 0.0f;
 
 	/// The shockwave's un-amplified values, captured once so config changes multiply
 	/// from the original baseline instead of compounding on top of the last edit.
