@@ -10,6 +10,7 @@
 #include "Equipment/FGWeapon.h"
 #include "NobeliskPlus.h"
 #include "NobeliskPlusConfiguration.h"
+#include "NobeliskPlusPulseRebarProjectile.h"
 #include "PhysicsEngine/RadialForceComponent.h"
 #include "Reflection/ReflectionHelper.h"
 #include "UObject/UnrealType.h"
@@ -63,6 +64,57 @@ URadialForceComponent* FindRadialForceComponentTemplate(UClass* actorClass)
 	}
 	return nullptr;
 }
+
+// ObjectTypesToAffect is protected on URadialForceComponent, so - like mAllowedAmmoClasses
+// on AFGWeapon - it's reached through reflection rather than direct member access.
+// TEnumAsByte<EObjectTypeQuery> surfaces as a plain FByteProperty array element.
+void EnsureObjectTypesToAffectIncludesPlayer(URadialForceComponent& radialForce, const FString& projectilePath)
+{
+	FArrayProperty* objectTypesProp = FReflectionHelper::FindPropertyChecked<FArrayProperty>(URadialForceComponent::StaticClass(), TEXT("ObjectTypesToAffect"));
+	FByteProperty* elementProp = CastField<FByteProperty>(objectTypesProp->Inner);
+	check(elementProp != nullptr);
+
+	FScriptArrayHelper arrayHelper(objectTypesProp, objectTypesProp->ContainerPtrToValuePtr<void>(&radialForce));
+
+	// Checking Num() == 0 to decide "unconfigured" was wrong: Unreal only serializes a
+	// property into the .uasset when it differs from its class default, and
+	// URadialForceComponent's own C++ default for this array is apparently already
+	// non-empty (it survived unnoticed because nothing here ever logged the values it
+	// found) - so BP_Rebar_Explosive silently inheriting that default, never having
+	// explicitly added Pawn, looked identical to "already configured" under a Num()>0
+	// check. Check for Pawn specifically instead.
+	const uint8 pawnByte = static_cast<uint8>(UEngineTypes::ConvertToObjectType(ECC_Pawn));
+	for (int32 index = 0; index < arrayHelper.Num(); ++index)
+	{
+		if (elementProp->GetPropertyValue(arrayHelper.GetRawPtr(index)) == pawnByte)
+		{
+			UE_LOG(LogNobeliskPlus, Log, TEXT("%s's RadialForceComponent already affects Pawns (%d object type(s) configured)."), *projectilePath, arrayHelper.Num());
+			return;
+		}
+	}
+
+	// The Radius/Impulse/Force values only decide how strong the push is; whether it
+	// affects a player at all is gated separately by ObjectTypesToAffect, which
+	// BP_Rebar_Explosive's component never had Pawn added to (it's set up for a bit of
+	// debris knock on impact, not for pushing the player - unlike BP_NobeliskShockwave's,
+	// which already includes Pawn). Match Nobelisk's set so the Pulse Rebar behaves the
+	// same way, replacing whatever was there rather than appending to avoid duplicates.
+	const EObjectTypeQuery objectTypes[] = {
+		UEngineTypes::ConvertToObjectType(ECC_WorldDynamic),
+		UEngineTypes::ConvertToObjectType(ECC_Pawn),
+		UEngineTypes::ConvertToObjectType(ECC_PhysicsBody),
+		UEngineTypes::ConvertToObjectType(ECC_Vehicle),
+		UEngineTypes::ConvertToObjectType(ECC_Destructible),
+	};
+	const int32 previousNum = arrayHelper.Num();
+	arrayHelper.Resize(UE_ARRAY_COUNT(objectTypes));
+	for (int32 index = 0; index < UE_ARRAY_COUNT(objectTypes); ++index)
+	{
+		elementProp->SetPropertyValue(arrayHelper.GetRawPtr(index), static_cast<uint8>(objectTypes[index]));
+	}
+
+	UE_LOG(LogNobeliskPlus, Log, TEXT("%s's RadialForceComponent did not affect Pawns (had %d object type(s) configured, none of them Pawn); replaced with Pawn/PhysicsBody/Vehicle/Destructible/WorldDynamic."), *projectilePath, previousNum);
+}
 } // namespace
 
 UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
@@ -79,6 +131,7 @@ UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
 	RebarTarget.ProjectilePath = PulseRebarProjectilePath;
 	RebarTarget.ConfigSectionName = TEXT("Rebar");
 	RebarTarget.bEnsurePlayerCanBePushed = true;
+	RebarTarget.bDrivesNativePulse = true;
 }
 
 void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase phase)
@@ -106,6 +159,7 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 	SetUpShockwaveTarget(NobeliskTarget, configRoot);
 	SetUpShockwaveTarget(RebarTarget, configRoot);
 	RegisterPulseRebarAsRebarGunAmmo();
+	ClearPulseRebarAmmoDamage();
 }
 
 void UNobeliskPlusGameInstanceModule::RegisterPulseRebarAsRebarGunAmmo() const
@@ -209,4 +263,54 @@ void UNobeliskPlusGameInstanceModule::ApplyShockwaveTarget(const FNobeliskPlusSh
 	target.RadialForce->Radius = target.BaseRadius * radiusMultiplier;
 	target.RadialForce->ImpulseStrength = target.BaseImpulseStrength * impulseMultiplier;
 	target.RadialForce->ForceStrength = target.BaseForceStrength * forceMultiplier;
+
+	if (target.bDrivesNativePulse)
+	{
+		// The Blueprint's RadialForceComponent is left configured above for physics debris,
+		// but the push players actually feel comes from ANobeliskPlusPulseRebarProjectile.
+		// Base launch velocity is its own number because LaunchCharacter takes cm/s, not an
+		// impulse - the component's impulse figure would be meaningless there.
+		constexpr float baseLaunchVelocity = 1200.0f;
+		ANobeliskPlusPulseRebarProjectile::PulseRadius = target.BaseRadius * radiusMultiplier;
+		ANobeliskPlusPulseRebarProjectile::PulseLaunchVelocity = baseLaunchVelocity * impulseMultiplier;
+		ANobeliskPlusPulseRebarProjectile::PulsePhysicsImpulse = target.BaseImpulseStrength * impulseMultiplier;
+	}
+}
+
+void UNobeliskPlusGameInstanceModule::ClearPulseRebarAmmoDamage() const
+{
+	// Damage does NOT come from the projectile Blueprint. AFGProjectile's own
+	// mDamageTypesOnImpact/mDamageTypesAtEndOfLife are empty on BP_Rebar_Explosive too -
+	// clearing them on BP_Rebar_Pulse was always a no-op. The damage types actually live on
+	// the AMMO DESCRIPTOR (UFGAmmoType::mDamageTypesOnImpact and
+	// UFGAmmoTypeProjectile::mDamageTypesAtEndOfLife) and are pushed onto each spawned
+	// projectile at fire time via SetupProjectile/SetImpactDamageTypes. Desc_Rebar_Pulse
+	// inherited BP_PointDamageType_Physical + BP_RadialDamageType_Explosive from the
+	// duplicated Desc_Rebar_Explosive, which is why the Pulse Rebar still hurt.
+	// Both properties are protected, so they are cleared through reflection.
+	UClass* ammoClass = StaticLoadClass(UObject::StaticClass(), nullptr, PulseRebarAmmoDescriptorPath);
+	if (ammoClass == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load the Pulse Rebar ammo descriptor; it will still deal damage."));
+		return;
+	}
+
+	UObject* ammoCdo = ammoClass->GetDefaultObject();
+	for (const TCHAR* propertyName : {TEXT("mDamageTypesOnImpact"), TEXT("mDamageTypesAtEndOfLife")})
+	{
+		FArrayProperty* damageTypesProp = CastField<FArrayProperty>(ammoClass->FindPropertyByName(propertyName));
+		if (damageTypesProp == nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Warning, TEXT("Pulse Rebar ammo descriptor has no %s property; skipping it."), propertyName);
+			continue;
+		}
+
+		FScriptArrayHelper arrayHelper(damageTypesProp, damageTypesProp->ContainerPtrToValuePtr<void>(ammoCdo));
+		const int32 previousNum = arrayHelper.Num();
+		if (previousNum == 0)
+			continue;
+
+		arrayHelper.EmptyValues();
+		UE_LOG(LogNobeliskPlus, Log, TEXT("Cleared %d damage type(s) from the Pulse Rebar ammo descriptor's %s; it is now push-only."), previousNum, propertyName);
+	}
 }

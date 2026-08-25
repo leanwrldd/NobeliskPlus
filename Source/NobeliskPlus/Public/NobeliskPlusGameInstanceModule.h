@@ -29,6 +29,10 @@ struct FNobeliskPlusShockwaveTarget
 	/// was never set up to affect players. BP_NobeliskShockwave's is already correct.
 	bool bEnsurePlayerCanBePushed = false;
 
+	/// True if this target drives ANobeliskPlusPulseRebarProjectile, whose push is applied in
+	/// C++ rather than by the projectile Blueprint - see that class for why.
+	bool bDrivesNativePulse = false;
+
 	UPROPERTY()
 	TObjectPtr<URadialForceComponent> RadialForce;
 
@@ -71,6 +75,7 @@ private:
 	void SetUpShockwaveTarget(FNobeliskPlusShockwaveTarget& target, UConfigPropertySection* configRoot);
 	void ApplyShockwaveTarget(const FNobeliskPlusShockwaveTarget& target) const;
 	void RegisterPulseRebarAsRebarGunAmmo() const;
+	void ClearPulseRebarAmmoDamage() const;
 
 	UPROPERTY()
 	FNobeliskPlusShockwaveTarget NobeliskTarget;
