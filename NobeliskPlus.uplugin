@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.1",
+	"VersionName": "1.0.2",
 	"FriendlyName": "Nobelisk Plus",
 	"Description": "Makes the Pulse Nobelisk's shockwave bigger and stronger (larger radius, harder push) without increasing its damage, and adds a Pulse Rebar with its own tweakable shockwave.",
 	"Category": "Modding",
@@ -27,13 +27,8 @@
 			"Name": "SML",
 			"Enabled": true,
 			"SemVersion": "^3.12.0"
-		},
-		{
-			"Name": "Niagara",
-			"Enabled": true,
-			"BaseGame": true
 		}
 	],
-	"SemVersion": "1.0.1",
+	"SemVersion": "1.0.2",
 	"GameVersion": ">=491125"
 }
