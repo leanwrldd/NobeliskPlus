@@ -12,6 +12,7 @@ public class NobeliskPlus : ModuleRules
 			"Engine",
 			"PhysicsCore",
 			"AssetRegistry",
+			"Niagara",
 		});
 
 		// Header stubs

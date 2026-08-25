@@ -2,13 +2,19 @@
 
 #include "Engine/OverlapResult.h"
 #include "GameFramework/Character.h"
+#include "Kismet/GameplayStatics.h"
 #include "NobeliskPlus.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
+#include "Particles/ParticleSystem.h"
 
 // Defaults mirror the RadialForceComponent that BP_Rebar_Explosive carries, so the numbers
 // stay recognisable; the module overwrites them from the mod configuration on startup.
 float ANobeliskPlusPulseRebarProjectile::PulseRadius = 500.0f;
 float ANobeliskPlusPulseRebarProjectile::PulseLaunchVelocity = 1200.0f;
 float ANobeliskPlusPulseRebarProjectile::PulsePhysicsImpulse = 120000.0f;
+UParticleSystem* ANobeliskPlusPulseRebarProjectile::ImpactEffect = nullptr;
+UNiagaraSystem* ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = nullptr;
 
 void ANobeliskPlusPulseRebarProjectile::OnImpact_Native(const FHitResult& hitResult)
 {
@@ -34,12 +40,24 @@ void ANobeliskPlusPulseRebarProjectile::ApplyPulse(const FVector& origin)
 	UWorld* world = GetWorld();
 	if (world == nullptr || !HasAuthority())
 		return;
+	// Single-player only for now, like the rest of this mod: HasAuthority() gates this whole
+	// function to the server, and SpawnEmitterAtLocation here has no client replication, so
+	// on a dedicated server or a non-host client the effect would not be visible.
 
 	const float radius = PulseRadius;
 	if (radius <= 0.0f)
 		return;
 
 	bPulseApplied = true;
+
+	if (ImpactEffect != nullptr)
+	{
+		UGameplayStatics::SpawnEmitterAtLocation(world, ImpactEffect, origin);
+	}
+	if (ImpactNiagaraEffect != nullptr)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAtLocation(world, ImpactNiagaraEffect, origin);
+	}
 
 	FCollisionObjectQueryParams objectParams;
 	objectParams.AddObjectTypesToQuery(ECC_Pawn);

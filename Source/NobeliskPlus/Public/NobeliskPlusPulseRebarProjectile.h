@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "FGProjectile.h"
+class UParticleSystem;
+class UNiagaraSystem;
 #include "NobeliskPlusPulseRebarProjectile.generated.h"
 
 /// Projectile for the Pulse Rebar.
@@ -29,6 +31,14 @@ public:
 	static float PulseRadius;
 	static float PulseLaunchVelocity;
 	static float PulsePhysicsImpulse;
+
+	/// Discovered once at startup by scanning BP_NobeliskShockwave_C's class hierarchy for
+	/// any UParticleSystem/UNiagaraSystem asset reference - see
+	/// FindImpactEffect in the .cpp. Both null if nothing was found, in which case no VFX is
+	/// spawned (silently - this is a cosmetic best-effort, not something that should ever
+	/// crash or block the actual push). At most one of the two is ever set.
+	static UParticleSystem* ImpactEffect;
+	static UNiagaraSystem* ImpactNiagaraEffect;
 
 	// AFGProjectile
 	virtual void OnImpact_Native(const FHitResult& hitResult) override;

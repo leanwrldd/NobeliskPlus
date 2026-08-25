@@ -69,6 +69,8 @@ UConfigPropertySection* AddShockwaveSection(UConfigPropertySection* parent, FNam
 {
 	UCP_Section* section = NewObject<UCP_Section>(parent, GetConfigPropertySectionClass(), name);
 	section->DisplayName = FText::FromString(weaponDisplayName);
+	section->HasHeader = true;
+	section->HeaderText = FText::FromString(weaponDisplayName);
 	section->WidgetType = ECP_SectionWidgetType::CPS_Vertical;
 	parent->SectionProperties.Add(name.ToString(), section);
 

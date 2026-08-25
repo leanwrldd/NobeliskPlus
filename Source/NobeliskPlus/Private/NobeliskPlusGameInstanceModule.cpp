@@ -10,7 +10,9 @@
 #include "Equipment/FGWeapon.h"
 #include "NobeliskPlus.h"
 #include "NobeliskPlusConfiguration.h"
+#include "NiagaraSystem.h"
 #include "NobeliskPlusPulseRebarProjectile.h"
+#include "Particles/ParticleSystem.h"
 #include "PhysicsEngine/RadialForceComponent.h"
 #include "Reflection/ReflectionHelper.h"
 #include "UObject/UnrealType.h"
@@ -115,6 +117,34 @@ void EnsureObjectTypesToAffectIncludesPlayer(URadialForceComponent& radialForce,
 
 	UE_LOG(LogNobeliskPlus, Log, TEXT("%s's RadialForceComponent did not affect Pawns (had %d object type(s) configured, none of them Pawn); replaced with Pawn/PhysicsBody/Vehicle/Destructible/WorldDynamic."), *projectilePath, previousNum);
 }
+
+// Scans actorClass's full native+Blueprint class hierarchy for any UParticleSystem asset
+// reference and returns the first non-null one found on the class default object. Used to
+// let the Pulse Rebar reuse whatever impact effect the vanilla Pulse Nobelisk uses, without
+// needing to know its exact property name - useful since BP_NobeliskShockwave's own
+// Blueprint graph has no VFX references at all, meaning the effect is set up natively in
+// code this project does not have source access to; if it lives on a reflected UPROPERTY
+// anywhere in the chain (native or Blueprint), this finds it regardless.
+UParticleSystem* FindParticleSystemPropertyValue(UClass* actorClass)
+{
+	UObject* cdo = actorClass->GetDefaultObject();
+	for (UClass* cls = actorClass; cls != nullptr; cls = cls->GetSuperClass())
+	{
+		for (TFieldIterator<FObjectProperty> propIt(cls, EFieldIteratorFlags::ExcludeSuper); propIt; ++propIt)
+		{
+			FObjectProperty* prop = *propIt;
+			if (prop->PropertyClass == nullptr || !prop->PropertyClass->IsChildOf(UParticleSystem::StaticClass()))
+				continue;
+
+			if (UObject* value = prop->GetObjectPropertyValue_InContainer(cdo))
+			{
+				UE_LOG(LogNobeliskPlus, Log, TEXT("Found particle system property %s::%s = %s"), *cls->GetName(), *prop->GetName(), *value->GetPathName());
+				return Cast<UParticleSystem>(value);
+			}
+		}
+	}
+	return nullptr;
+}
 } // namespace
 
 UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
@@ -160,6 +190,19 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 	SetUpShockwaveTarget(RebarTarget, configRoot);
 	RegisterPulseRebarAsRebarGunAmmo();
 	ClearPulseRebarAmmoDamage();
+
+	{
+		UClass* nobeliskClass = StaticLoadClass(AActor::StaticClass(), nullptr, PulseNobeliskProjectilePath);
+		ANobeliskPlusPulseRebarProjectile::ImpactEffect = nobeliskClass != nullptr ? FindParticleSystemPropertyValue(nobeliskClass) : nullptr;
+		if (ANobeliskPlusPulseRebarProjectile::ImpactEffect != nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Rebar will reuse the Pulse Nobelisk's impact particle system."));
+		}
+		else
+		{
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Could not find any particle system asset reference on the Pulse Nobelisk's class hierarchy - it is likely spawned natively in code this project does not have source for. The Pulse Rebar's impact will have no VFX."));
+		}
+	}
 }
 
 void UNobeliskPlusGameInstanceModule::RegisterPulseRebarAsRebarGunAmmo() const
