@@ -4,9 +4,11 @@
 #include "Module/GameWorldModule.h"
 #include "NobeliskPlusWorldModule.generated.h"
 
-/// Registers the Pulse Rebar's MAM research tree (ResearchTree_PulseRebar), so it can be
-/// researched and its recipe unlocked the same way the base game's other rebar variants
-/// are unlocked through the MAM.
+/// Injects a Pulse Rebar research node directly into the base game's Quartz MAM tree,
+/// right after the Pulse Nobelisk node, instead of registering a separate tree. The
+/// Quartz tree is base game content we don't own, so this patches its class default
+/// object at runtime (via UFGResearchTree::GetNodes/SetNodes) rather than editing the
+/// vanilla asset, which wouldn't ship inside this plugin's pak anyway.
 UCLASS()
 class NOBELISKPLUS_API UNobeliskPlusWorldModule : public UGameWorldModule
 {
@@ -17,4 +19,7 @@ public:
 
 	// UGameWorldModule
 	virtual void DispatchLifecycleEvent(ELifecyclePhase phase) override;
+
+private:
+	void AddPulseRebarNodeToQuartzTree();
 };

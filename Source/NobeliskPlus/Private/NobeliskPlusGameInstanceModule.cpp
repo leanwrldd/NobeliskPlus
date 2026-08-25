@@ -3,9 +3,16 @@
 #include "Configuration/ConfigManager.h"
 #include "Configuration/Properties/ConfigPropertyFloat.h"
 #include "Configuration/Properties/ConfigPropertySection.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Equipment/FGWeapon.h"
 #include "NobeliskPlus.h"
 #include "NobeliskPlusConfiguration.h"
 #include "PhysicsEngine/RadialForceComponent.h"
+#include "Reflection/ReflectionHelper.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -17,10 +24,44 @@ constexpr const TCHAR* PulseNobeliskProjectilePath =
 	TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/BP_NobeliskShockwave.BP_NobeliskShockwave_C");
 constexpr const TCHAR* PulseRebarProjectilePath =
 	TEXT("/NobeliskPlus/Ammo/BP_Rebar_Pulse.BP_Rebar_Pulse_C");
+constexpr const TCHAR* PulseRebarAmmoDescriptorPath =
+	TEXT("/NobeliskPlus/Ammo/Desc_Rebar_Pulse.Desc_Rebar_Pulse_C");
+// The Rebar Gun doesn't accept every UFGAmmoType-derived item automatically - it whitelists
+// them explicitly on the equipment Blueprint (mAllowedAmmoClasses), which is why a new ammo
+// type otherwise never shows up as loadable, even with a valid recipe and MAM unlock.
+constexpr const TCHAR* RebarGunEquipmentPath =
+	TEXT("/Game/FactoryGame/Equipment/RebarGun/Equip_RebarGun_Projectile.Equip_RebarGun_Projectile_C");
 
 UConfigPropertyFloat* FindMultiplierProperty(UConfigPropertySection* section, const TCHAR* name)
 {
 	return section != nullptr ? Cast<UConfigPropertyFloat>(section->SectionProperties.FindRef(name)) : nullptr;
+}
+
+// RadialForce is a Blueprint Simple-Construction-Script component (added via the
+// Components panel), not a component the native base class constructs in its own
+// constructor. SCS components are NOT attached to a Blueprint class's CDO - they only
+// get instanced onto actual spawned actors via the construction script - so
+// cdo->FindComponentByClass<URadialForceComponent>() always silently returns null here,
+// regardless of the component visibly existing in the Blueprint. What every spawned
+// instance actually copies its property values from is the SCS node's ComponentTemplate,
+// which is what needs patching instead.
+URadialForceComponent* FindRadialForceComponentTemplate(UClass* actorClass)
+{
+	for (UClass* currentClass = actorClass; currentClass != nullptr; currentClass = currentClass->GetSuperClass())
+	{
+		const UBlueprintGeneratedClass* blueprintClass = Cast<UBlueprintGeneratedClass>(currentClass);
+		if (blueprintClass == nullptr || blueprintClass->SimpleConstructionScript == nullptr)
+			continue;
+
+		for (USCS_Node* node : blueprintClass->SimpleConstructionScript->GetAllNodes())
+		{
+			if (URadialForceComponent* component = Cast<URadialForceComponent>(node->ComponentTemplate))
+			{
+				return component;
+			}
+		}
+	}
+	return nullptr;
 }
 } // namespace
 
@@ -37,6 +78,7 @@ UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
 
 	RebarTarget.ProjectilePath = PulseRebarProjectilePath;
 	RebarTarget.ConfigSectionName = TEXT("Rebar");
+	RebarTarget.bEnsurePlayerCanBePushed = true;
 }
 
 void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase phase)
@@ -63,6 +105,39 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 
 	SetUpShockwaveTarget(NobeliskTarget, configRoot);
 	SetUpShockwaveTarget(RebarTarget, configRoot);
+	RegisterPulseRebarAsRebarGunAmmo();
+}
+
+void UNobeliskPlusGameInstanceModule::RegisterPulseRebarAsRebarGunAmmo() const
+{
+	UClass* rebarGunClass = StaticLoadClass(AFGWeapon::StaticClass(), nullptr, RebarGunEquipmentPath);
+	UClass* pulseRebarDescriptorClass = StaticLoadClass(UObject::StaticClass(), nullptr, PulseRebarAmmoDescriptorPath);
+	if (rebarGunClass == nullptr || pulseRebarDescriptorClass == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load the Rebar Gun and/or the Pulse Rebar ammo descriptor; the Pulse Rebar won't be loadable into the Rebar Gun."));
+		return;
+	}
+
+	// mAllowedAmmoClasses is protected on AFGWeapon, so it's appended to via reflection
+	// rather than direct member access.
+	AFGWeapon* rebarGunCdo = rebarGunClass->GetDefaultObject<AFGWeapon>();
+	FArrayProperty* allowedAmmoProp = FReflectionHelper::FindPropertyChecked<FArrayProperty>(AFGWeapon::StaticClass(), TEXT("mAllowedAmmoClasses"));
+	FClassProperty* elementProp = CastField<FClassProperty>(allowedAmmoProp->Inner);
+	check(elementProp != nullptr);
+
+	FScriptArrayHelper arrayHelper(allowedAmmoProp, allowedAmmoProp->ContainerPtrToValuePtr<void>(rebarGunCdo));
+	for (int32 index = 0; index < arrayHelper.Num(); ++index)
+	{
+		if (elementProp->GetObjectPropertyValue(arrayHelper.GetRawPtr(index)) == pulseRebarDescriptorClass)
+		{
+			return; // already present (e.g. a second call within the same process)
+		}
+	}
+
+	const int32 newIndex = arrayHelper.AddValue();
+	elementProp->SetObjectPropertyValue(arrayHelper.GetRawPtr(newIndex), pulseRebarDescriptorClass);
+
+	UE_LOG(LogNobeliskPlus, Log, TEXT("Added the Pulse Rebar to the Rebar Gun's allowed ammo classes."));
 }
 
 void UNobeliskPlusGameInstanceModule::SetUpShockwaveTarget(FNobeliskPlusShockwaveTarget& target, UConfigPropertySection* configRoot)
@@ -74,8 +149,7 @@ void UNobeliskPlusGameInstanceModule::SetUpShockwaveTarget(FNobeliskPlusShockwav
 		return;
 	}
 
-	AActor* cdo = projectileClass->GetDefaultObject<AActor>();
-	target.RadialForce = cdo->FindComponentByClass<URadialForceComponent>();
+	target.RadialForce = FindRadialForceComponentTemplate(projectileClass);
 	if (target.RadialForce == nullptr)
 	{
 		UE_LOG(LogNobeliskPlus, Error, TEXT("%s no longer has a RadialForceComponent; its shockwave was not amplified."), *target.ProjectilePath);
@@ -86,6 +160,11 @@ void UNobeliskPlusGameInstanceModule::SetUpShockwaveTarget(FNobeliskPlusShockwav
 	target.BaseImpulseStrength = target.RadialForce->ImpulseStrength;
 	target.BaseForceStrength = target.RadialForce->ForceStrength;
 	CDOEdits.Add(target.RadialForce);
+
+	if (target.bEnsurePlayerCanBePushed)
+	{
+		EnsureObjectTypesToAffectIncludesPlayer(*target.RadialForce, target.ProjectilePath);
+	}
 
 	UConfigPropertySection* section = configRoot != nullptr
 		? Cast<UConfigPropertySection>(configRoot->SectionProperties.FindRef(target.ConfigSectionName))

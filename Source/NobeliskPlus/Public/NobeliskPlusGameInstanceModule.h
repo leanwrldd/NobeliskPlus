@@ -23,6 +23,12 @@ struct FNobeliskPlusShockwaveTarget
 	/// UNobeliskPlusConfiguration), e.g. "Nobelisk" or "Rebar".
 	FString ConfigSectionName;
 
+	/// True if this projectile's RadialForceComponent needs its ObjectTypesToAffect
+	/// populated (Pawn, PhysicsBody, ...) because its source Blueprint's own is empty -
+	/// e.g. BP_Rebar_Explosive's component is configured for minor debris knock only and
+	/// was never set up to affect players. BP_NobeliskShockwave's is already correct.
+	bool bEnsurePlayerCanBePushed = false;
+
 	UPROPERTY()
 	TObjectPtr<URadialForceComponent> RadialForce;
 
@@ -64,6 +70,7 @@ private:
 
 	void SetUpShockwaveTarget(FNobeliskPlusShockwaveTarget& target, UConfigPropertySection* configRoot);
 	void ApplyShockwaveTarget(const FNobeliskPlusShockwaveTarget& target) const;
+	void RegisterPulseRebarAsRebarGunAmmo() const;
 
 	UPROPERTY()
 	FNobeliskPlusShockwaveTarget NobeliskTarget;
