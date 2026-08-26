@@ -2,7 +2,19 @@
 
 All notable changes to Nobelisk Plus, since the 1.0 release.
 
-## Unreleased
+## 1.0.3 (unreleased)
+
+### Added
+- Optional "Automatically Reload" toggle for the Nobelisk Detonator and the
+  Rebar Gun. Works around the Nobelisk Detonator only loading one round per
+  reload pass, and around none of the obvious native signals firing usefully
+  for either weapon, by polling ammo count instead of trying to catch a
+  reload-trigger event directly.
+- Optional magazine capacity overrides: a general capacity fallback plus a
+  per-ammo-type override for every Nobelisk and Rebar variant. 0 means
+  vanilla/unset throughout, so the feature is fully opt-in.
+
+## 1.0.2
 
 ### Added
 - Pulse Rebar research node grafted directly onto the base game's Quartz research
@@ -28,10 +40,14 @@ All notable changes to Nobelisk Plus, since the 1.0 release.
 - Config settings now apply live, in-session, as intended — cleared
   `bRequiresWorldReload`, which had been defaulting to true and silently
   limiting edits to the main menu.
-- Added the `Niagara` module/plugin dependency, needed for the impact VFX work.
 
 ### Fixed
-- N/A
+- ficsit.app rejected the first upload attempt with a backend "mod not found"
+  error while creating the version. Per ficsit.app support, this was caused by
+  listing `Niagara` — needed at compile time via `NobeliskPlus.Build.cs`, not
+  as a plugin-level dependency — in the `.uplugin`'s `Plugins` array; removed
+  it. Confirmed the mod still builds clean without that entry (UBT only emits
+  a warning, not an error).
 
 ## 1.0
 
