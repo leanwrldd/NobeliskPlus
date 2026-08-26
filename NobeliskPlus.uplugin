@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.2",
+	"VersionName": "1.0.3",
 	"FriendlyName": "Nobelisk Plus",
 	"Description": "Makes the Pulse Nobelisk's shockwave bigger and stronger (larger radius, harder push) without increasing its damage, and adds a Pulse Rebar with its own tweakable shockwave.",
 	"Category": "Modding",
@@ -29,6 +29,6 @@
 			"SemVersion": "^3.12.0"
 		}
 	],
-	"SemVersion": "1.0.2",
+	"SemVersion": "1.0.3",
 	"GameVersion": ">=491125"
 }
