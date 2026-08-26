@@ -3,7 +3,9 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Configuration/ConfigManager.h"
+#include "Configuration/Properties/ConfigPropertyBool.h"
 #include "Configuration/Properties/ConfigPropertyFloat.h"
+#include "Configuration/Properties/ConfigPropertyInteger.h"
 #include "Configuration/Properties/ConfigPropertySection.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -13,6 +15,7 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "DamageTypes/FGDamageType.h"
 #include "Materials/MaterialInterface.h"
+#include "Equipment/FGAmmoType.h"
 #include "Equipment/FGWeapon.h"
 #include "FGProjectileMovementComponent.h"
 #include "NobeliskPlus.h"
@@ -23,6 +26,7 @@
 #include "PhysicsEngine/RadialForceComponent.h"
 #include "Reflection/ReflectionHelper.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
@@ -56,10 +60,62 @@ constexpr const TCHAR* RebarProjectileMeshPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Mesh/Rebar_static_01.Rebar_static_01");
 constexpr const TCHAR* RebarGunEquipmentPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Equip_RebarGun_Projectile.Equip_RebarGun_Projectile_C");
+constexpr const TCHAR* NobeliskDetonatorEquipmentPath =
+	TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Equip_NobeliskDetonator.Equip_NobeliskDetonator_C");
+
+// The ammo descriptors each weapon's mAllowedAmmoClasses actually lists (confirmed by
+// grepping each equipment Blueprint's own class references, since mAllowedAmmoClasses is
+// populated by its construction script rather than a reflectable CDO array default).
+const FNobeliskDescriptorInfo NobeliskDetonatorDescriptors[] = {
+	{ TEXT("/Game/FactoryGame/Resource/Parts/NobeliskExplosive/Desc_NobeliskExplosive.Desc_NobeliskExplosive_C"), TEXT("ExplosiveCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/Desc_NobeliskGas.Desc_NobeliskGas_C"), TEXT("GasCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/Desc_NobeliskShockwave.Desc_NobeliskShockwave_C"), TEXT("ShockwaveCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/Desc_NobeliskCluster.Desc_NobeliskCluster_C"), TEXT("ClusterCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/NobeliskDetonator/Ammo/Desc_NobeliskNuke.Desc_NobeliskNuke_C"), TEXT("NukeCapacity") },
+};
+
+// Includes Desc_Rebar_Pulse - the ammo type this mod itself adds to the Rebar Gun's
+// mAllowedAmmoClasses in RegisterPulseRebarAsRebarGunAmmo() - alongside the four vanilla types.
+const FNobeliskDescriptorInfo RebarGunDescriptors[] = {
+	{ TEXT("/Game/FactoryGame/Resource/Parts/SpikedRebar/Desc_SpikedRebar.Desc_SpikedRebar_C"), TEXT("StandardCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/RebarGun/Ammo/Desc_Rebar_Explosive.Desc_Rebar_Explosive_C"), TEXT("ExplosiveCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/RebarGun/Ammo/Desc_Rebar_Spreadshot.Desc_Rebar_Spreadshot_C"), TEXT("SpreadshotCapacity") },
+	{ TEXT("/Game/FactoryGame/Equipment/RebarGun/Ammo/Desc_Rebar_Stunshot.Desc_Rebar_Stunshot_C"), TEXT("StunshotCapacity") },
+	{ TEXT("/NobeliskPlus/Ammo/Desc_Rebar_Pulse.Desc_Rebar_Pulse_C"), TEXT("PulseCapacity") },
+};
 
 UConfigPropertyFloat* FindMultiplierProperty(UConfigPropertySection* section, const TCHAR* name)
 {
 	return section != nullptr ? Cast<UConfigPropertyFloat>(section->SectionProperties.FindRef(name)) : nullptr;
+}
+
+// mAutomaticallyReload is protected on AFGWeapon (see mAllowedAmmoClasses above for why
+// that means reflection instead of direct member access). Applied both to a Blueprint CDO,
+// which is what weapons spawned later copy from, and to already-spawned instances, which
+// would otherwise keep the value they copied at spawn time - see ApplyAutoReloadTarget.
+void SetWeaponAutomaticallyReload(AFGWeapon& weapon, bool bAutomaticallyReload)
+{
+	FBoolProperty* autoReloadProp = FReflectionHelper::FindPropertyChecked<FBoolProperty>(AFGWeapon::StaticClass(), TEXT("mAutomaticallyReload"));
+	autoReloadProp->SetPropertyValue_InContainer(&weapon, bAutomaticallyReload);
+}
+
+// mMagazineSize is protected on UFGAmmoType (GetMagSize() reads it through the ammo class's
+// own CDO at fire/reload time - see FGWeapon.h - so patching it here is enough, unlike the
+// weapon-side numbers above which live on a per-instance RadialForceComponent template).
+FIntProperty* GetMagazineSizeProperty()
+{
+	static FIntProperty* prop = FReflectionHelper::FindPropertyChecked<FIntProperty>(UFGAmmoType::StaticClass(), TEXT("mMagazineSize"));
+	return prop;
+}
+
+int32 GetMagazineSize(const UFGAmmoType& ammoCdo)
+{
+	return GetMagazineSizeProperty()->GetPropertyValue_InContainer(&ammoCdo);
+}
+
+void SetMagazineSize(UFGAmmoType& ammoCdo, int32 magazineSize)
+{
+	GetMagazineSizeProperty()->SetPropertyValue_InContainer(&ammoCdo, magazineSize);
 }
 
 // RadialForce is a Blueprint Simple-Construction-Script component (added via the
@@ -445,6 +501,20 @@ UNobeliskPlusGameInstanceModule::UNobeliskPlusGameInstanceModule()
 	RebarTarget.ConfigSectionName = TEXT("Rebar");
 	RebarTarget.bEnsurePlayerCanBePushed = true;
 	RebarTarget.bDrivesNativePulse = true;
+
+	FNobeliskPlusAutoReloadTarget& detonatorAutoReload = AutoReloadTargets.AddDefaulted_GetRef();
+	detonatorAutoReload.EquipmentPath = NobeliskDetonatorEquipmentPath;
+	detonatorAutoReload.ConfigSectionName = TEXT("Detonator");
+
+	FNobeliskPlusAutoReloadTarget& rebarGunAutoReload = AutoReloadTargets.AddDefaulted_GetRef();
+	rebarGunAutoReload.EquipmentPath = RebarGunEquipmentPath;
+	rebarGunAutoReload.ConfigSectionName = TEXT("RebarGun");
+
+	FNobeliskPlusCapacityGroup& detonatorCapacity = CapacityGroups.AddDefaulted_GetRef();
+	detonatorCapacity.ConfigSectionName = TEXT("Detonator");
+
+	FNobeliskPlusCapacityGroup& rebarGunCapacity = CapacityGroups.AddDefaulted_GetRef();
+	rebarGunCapacity.ConfigSectionName = TEXT("RebarGun");
 }
 
 void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase phase)
@@ -473,6 +543,19 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 	SetUpShockwaveTarget(RebarTarget, configRoot);
 	RegisterPulseRebarAsRebarGunAmmo();
 	ClearPulseRebarAmmoDamage();
+
+	for (FNobeliskPlusAutoReloadTarget& target : AutoReloadTargets)
+	{
+		SetUpAutoReloadTarget(target, configRoot);
+	}
+	OnAutoReloadConfigChanged();
+
+	// Indices match the order the groups were added to CapacityGroups in the constructor:
+	// Detonator, then Rebar Gun.
+	check(CapacityGroups.Num() == 2);
+	SetUpCapacityGroup(CapacityGroups[0], configRoot, NobeliskDetonatorDescriptors);
+	SetUpCapacityGroup(CapacityGroups[1], configRoot, RebarGunDescriptors);
+	OnCapacityConfigChanged();
 
 	{
 		UClass* nobeliskClass = StaticLoadClass(AActor::StaticClass(), nullptr, PulseNobeliskProjectilePath);
@@ -746,4 +829,144 @@ void UNobeliskPlusGameInstanceModule::ClearPulseRebarAmmoDamage() const
 			}
 		}
 	}
+}
+
+void UNobeliskPlusGameInstanceModule::SetUpAutoReloadTarget(FNobeliskPlusAutoReloadTarget& target, UConfigPropertySection* configRoot)
+{
+	UClass* weaponClass = StaticLoadClass(AFGWeapon::StaticClass(), nullptr, *target.EquipmentPath);
+	if (weaponClass == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load the weapon equipment class at %s; its auto-reload option won't do anything."), *target.EquipmentPath);
+		return;
+	}
+
+	target.WeaponCdo = Cast<AFGWeapon>(weaponClass->GetDefaultObject());
+	if (target.WeaponCdo == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("%s's CDO is not an AFGWeapon; its auto-reload option won't do anything."), *target.EquipmentPath);
+		return;
+	}
+
+	UConfigPropertySection* weaponSection = configRoot != nullptr
+		? Cast<UConfigPropertySection>(configRoot->SectionProperties.FindRef(target.ConfigSectionName))
+		: nullptr;
+	target.AutoReloadProperty = weaponSection != nullptr
+		? Cast<UConfigPropertyBool>(weaponSection->SectionProperties.FindRef(TEXT("AutoReload")))
+		: nullptr;
+	if (target.AutoReloadProperty != nullptr)
+	{
+		target.AutoReloadProperty->OnPropertyValueChanged.AddDynamic(this, &UNobeliskPlusGameInstanceModule::OnAutoReloadConfigChanged);
+	}
+}
+
+void UNobeliskPlusGameInstanceModule::OnAutoReloadConfigChanged()
+{
+	for (const FNobeliskPlusAutoReloadTarget& target : AutoReloadTargets)
+	{
+		ApplyAutoReloadTarget(target);
+	}
+}
+
+void UNobeliskPlusGameInstanceModule::ApplyAutoReloadTarget(const FNobeliskPlusAutoReloadTarget& target) const
+{
+	if (target.WeaponCdo == nullptr)
+		return;
+
+	const bool bAutoReload = target.AutoReloadProperty != nullptr ? target.AutoReloadProperty->Value : false;
+	SetWeaponAutomaticallyReload(*target.WeaponCdo, bAutoReload);
+
+	// Patching the CDO alone only affects weapons spawned from here on. mAutomaticallyReload
+	// is EditDefaultsOnly, so an equipment instance copies it once at spawn time and then
+	// keeps that value - which is why toggling this setting mid-game appeared to do nothing
+	// for a weapon the player was already holding, even though the log said "enabled".
+	// Refreshing live instances is also what lets a plain AFGWeapon's own native auto-reload
+	// work, since that reads the instance's copy rather than the class default.
+	UClass* weaponClass = target.WeaponCdo->GetClass();
+	int32 instancesUpdated = 0;
+	for (TObjectIterator<AFGWeapon> weaponIt; weaponIt; ++weaponIt)
+	{
+		AFGWeapon* weapon = *weaponIt;
+		if (weapon == nullptr || weapon->GetClass() != weaponClass || weapon->HasAnyFlags(RF_ClassDefaultObject))
+			continue;
+
+		SetWeaponAutomaticallyReload(*weapon, bAutoReload);
+		++instancesUpdated;
+	}
+
+	UE_LOG(LogNobeliskPlus, Log, TEXT("%s auto-reload: %s (%d live instance(s) updated)"),
+		*target.EquipmentPath, bAutoReload ? TEXT("enabled") : TEXT("disabled"), instancesUpdated);
+}
+
+void UNobeliskPlusGameInstanceModule::SetUpCapacityGroup(FNobeliskPlusCapacityGroup& group, UConfigPropertySection* configRoot, TArrayView<const FNobeliskDescriptorInfo> descriptors)
+{
+	UConfigPropertySection* weaponSection = configRoot != nullptr
+		? Cast<UConfigPropertySection>(configRoot->SectionProperties.FindRef(group.ConfigSectionName))
+		: nullptr;
+	UConfigPropertySection* capacitySection = weaponSection != nullptr
+		? Cast<UConfigPropertySection>(weaponSection->SectionProperties.FindRef(TEXT("Capacity")))
+		: nullptr;
+
+	group.GeneralCapacityProperty = capacitySection != nullptr
+		? Cast<UConfigPropertyInteger>(capacitySection->SectionProperties.FindRef(TEXT("GeneralCapacity")))
+		: nullptr;
+	if (group.GeneralCapacityProperty != nullptr)
+	{
+		group.GeneralCapacityProperty->OnPropertyValueChanged.AddDynamic(this, &UNobeliskPlusGameInstanceModule::OnCapacityConfigChanged);
+	}
+
+	group.Targets.Reset();
+	for (const FNobeliskDescriptorInfo& descriptor : descriptors)
+	{
+		UClass* ammoClass = StaticLoadClass(UFGAmmoType::StaticClass(), nullptr, descriptor.Path);
+		if (ammoClass == nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load ammo descriptor %s; its capacity won't be configurable."), descriptor.Path);
+			continue;
+		}
+
+		FNobeliskPlusAmmoCapacityTarget target;
+		target.DescriptorPath = descriptor.Path;
+		target.ConfigPropertyName = descriptor.ConfigPropertyName;
+		target.AmmoCdo = Cast<UFGAmmoType>(ammoClass->GetDefaultObject());
+		if (target.AmmoCdo == nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Error, TEXT("%s's CDO is not a UFGAmmoType; its capacity won't be configurable."), descriptor.Path);
+			continue;
+		}
+		target.BaseMagazineSize = GetMagazineSize(*target.AmmoCdo);
+
+		target.SpecificCapacityProperty = capacitySection != nullptr
+			? Cast<UConfigPropertyInteger>(capacitySection->SectionProperties.FindRef(descriptor.ConfigPropertyName))
+			: nullptr;
+		if (target.SpecificCapacityProperty != nullptr)
+		{
+			target.SpecificCapacityProperty->OnPropertyValueChanged.AddDynamic(this, &UNobeliskPlusGameInstanceModule::OnCapacityConfigChanged);
+		}
+
+		group.Targets.Add(target);
+	}
+}
+
+void UNobeliskPlusGameInstanceModule::OnCapacityConfigChanged()
+{
+	for (const FNobeliskPlusCapacityGroup& group : CapacityGroups)
+	{
+		const int32 generalCapacity = group.GeneralCapacityProperty != nullptr ? group.GeneralCapacityProperty->Value : 0;
+		for (const FNobeliskPlusAmmoCapacityTarget& target : group.Targets)
+		{
+			ApplyCapacityTarget(target, generalCapacity);
+		}
+	}
+}
+
+void UNobeliskPlusGameInstanceModule::ApplyCapacityTarget(const FNobeliskPlusAmmoCapacityTarget& target, int32 generalCapacity) const
+{
+	if (target.AmmoCdo == nullptr)
+		return;
+
+	const int32 specificCapacity = target.SpecificCapacityProperty != nullptr ? target.SpecificCapacityProperty->Value : 0;
+	const int32 effectiveCapacity = specificCapacity > 0 ? specificCapacity : (generalCapacity > 0 ? generalCapacity : target.BaseMagazineSize);
+
+	SetMagazineSize(*target.AmmoCdo, effectiveCapacity);
+	UE_LOG(LogNobeliskPlus, Log, TEXT("%s magazine capacity: %d -> %d"), *target.DescriptorPath, target.BaseMagazineSize, effectiveCapacity);
 }
