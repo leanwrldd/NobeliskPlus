@@ -2,7 +2,18 @@
 
 All notable changes to Nobelisk Plus, since the 1.0 release.
 
-## 1.0.3 (unreleased)
+## 1.0.4
+
+### Fixed
+- Pulse Rebar had no explosion effect in game. The automatic lookup of the
+  Pulse Nobelisk's effect only worked in the editor and found nothing in a
+  shipped build; the effect (`NS_ShockwaveNobelisk_01`) is now loaded by path.
+- Pulse Rebar research appeared and could be researched as soon as the Pulse
+  Nobelisk could, because its node copied the Pulse Nobelisk's visibility
+  links and its schematic had no dependency. It now stays hidden until the
+  Pulse Nobelisk is researched and requires it to be purchased.
+
+## 1.0.3
 
 ### Added
 - Optional "Automatically Reload" toggle for the Nobelisk Detonator and the
@@ -13,15 +24,6 @@ All notable changes to Nobelisk Plus, since the 1.0 release.
 - Optional magazine capacity overrides: a general capacity fallback plus a
   per-ammo-type override for every Nobelisk and Rebar variant. 0 means
   vanilla/unset throughout, so the feature is fully opt-in.
-
-### Fixed
-- Pulse Rebar had no explosion effect in game. The automatic lookup of the
-  Pulse Nobelisk's effect only worked in the editor and found nothing in a
-  shipped build; the effect (`NS_ShockwaveNobelisk_01`) is now loaded by path.
-- Pulse Rebar research appeared and could be researched as soon as the Pulse
-  Nobelisk could, because its node copied the Pulse Nobelisk's visibility
-  links and its schematic had no dependency. It now stays hidden until the
-  Pulse Nobelisk is researched and requires it to be purchased.
 
 ## 1.0.2
 
