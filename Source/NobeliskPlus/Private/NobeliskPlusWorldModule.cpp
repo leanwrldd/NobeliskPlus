@@ -3,6 +3,7 @@
 #include "FGResearchTree.h"
 #include "FGResearchTreeNode.h"
 #include "FGSchematic.h"
+#include "AvailabilityDependencies/FGSchematicPurchasedDependency.h"
 #include "NobeliskPlus.h"
 #include "UObject/UnrealType.h"
 
@@ -110,7 +111,118 @@ struct FNodeDataStructAccessor
 		Helper.AddValue();
 		ParentCoordType->CopyScriptStruct(Helper.GetRawPtr(0), ParentCoordPtr);
 	}
+
+	// UnhiddenBy / NodesToUnhide are arrays of the same Coordinates struct as Parents. A node
+	// stays hidden in the MAM until a node listed in its UnhiddenBy is researched, and
+	// researching a node reveals the ones in its NodesToUnhide. Returns the array, or null if
+	// the field is missing or isn't a Coordinates array.
+	FArrayProperty* FindCoordinatesArray(const TCHAR* Name) const
+	{
+		UScriptStruct* CoordStructType = nullptr;
+		GetCoordinatesPtr(&CoordStructType);
+		FArrayProperty* ArrayProp = FindPropertyByShortName<FArrayProperty>(NodeDataStructType, Name);
+		const FStructProperty* InnerProp = ArrayProp != nullptr ? CastField<FStructProperty>(ArrayProp->Inner) : nullptr;
+		if (InnerProp == nullptr || InnerProp->Struct != CoordStructType)
+		{
+			UE_LOG(LogNobeliskPlus, Warning, TEXT("Research node data has no Coordinates array named %s; left as is."), Name);
+			return nullptr;
+		}
+		return ArrayProp;
+	}
+
+	void SetCoordinatesArray(const TCHAR* Name, const FNodeDataStructAccessor* Entry) const
+	{
+		FArrayProperty* ArrayProp = FindCoordinatesArray(Name);
+		if (ArrayProp == nullptr)
+		{
+			return;
+		}
+		FScriptArrayHelper Helper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(NodeDataPtr));
+		Helper.EmptyValues();
+		if (Entry != nullptr)
+		{
+			UScriptStruct* CoordStructType = nullptr;
+			if (void* EntryCoordPtr = Entry->GetCoordinatesPtr(&CoordStructType))
+			{
+				Helper.AddValue();
+				CoordStructType->CopyScriptStruct(Helper.GetRawPtr(0), EntryCoordPtr);
+			}
+		}
+	}
+
+	void AddToCoordinatesArray(const TCHAR* Name, const FNodeDataStructAccessor& Entry) const
+	{
+		FArrayProperty* ArrayProp = FindCoordinatesArray(Name);
+		UScriptStruct* CoordStructType = nullptr;
+		void* EntryCoordPtr = Entry.GetCoordinatesPtr(&CoordStructType);
+		if (ArrayProp == nullptr || EntryCoordPtr == nullptr)
+		{
+			return;
+		}
+		FScriptArrayHelper Helper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(NodeDataPtr));
+		const int32 Index = Helper.AddValue();
+		CoordStructType->CopyScriptStruct(Helper.GetRawPtr(Index), EntryCoordPtr);
+	}
+
+	// ChildrenAndRoads maps child coordinates to the road drawn to them. The copy would draw
+	// the Pulse Nobelisk's roads from the Pulse Rebar node, so empty it.
+	void ClearChildrenAndRoads() const
+	{
+		if (FMapProperty* MapProp = FindPropertyByShortName<FMapProperty>(NodeDataStructType, TEXT("ChildrenAndRoads")))
+		{
+			FScriptMapHelper Helper(MapProp, MapProp->ContainerPtrToValuePtr<void>(NodeDataPtr));
+			Helper.EmptyValues();
+		}
+	}
 };
+
+// Makes PulseRebarSchematic purchasable only once PulseNobeliskSchematic has been purchased.
+// Copied from the Pulse Nobelisk's own dependency object, so the result is the same concrete
+// UFGSchematicPurchasedDependency Blueprint vanilla research uses (the native class is abstract).
+// mSchematicDependencies and mSchematics are protected, hence reflection.
+void RequirePulseNobeliskForPulseRebar(UClass* PulseNobeliskSchematicClass, UClass* PulseRebarSchematicClass)
+{
+	FArrayProperty* DependenciesProp = CastField<FArrayProperty>(UFGSchematic::StaticClass()->FindPropertyByName(TEXT("mSchematicDependencies")));
+	FObjectProperty* DependencyElementProp = DependenciesProp != nullptr ? CastField<FObjectProperty>(DependenciesProp->Inner) : nullptr;
+	FArrayProperty* SchematicsProp = CastField<FArrayProperty>(UFGSchematicPurchasedDependency::StaticClass()->FindPropertyByName(TEXT("mSchematics")));
+	FClassProperty* SchematicElementProp = SchematicsProp != nullptr ? CastField<FClassProperty>(SchematicsProp->Inner) : nullptr;
+	if (DependencyElementProp == nullptr || SchematicElementProp == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not find the schematic dependency properties; the Pulse Rebar won't require the Pulse Nobelisk."));
+		return;
+	}
+
+	UObject* PulseNobeliskCdo = PulseNobeliskSchematicClass->GetDefaultObject();
+	UObject* PulseRebarCdo = PulseRebarSchematicClass->GetDefaultObject();
+	FScriptArrayHelper NobeliskDependencies(DependenciesProp, DependenciesProp->ContainerPtrToValuePtr<void>(PulseNobeliskCdo));
+	FScriptArrayHelper RebarDependencies(DependenciesProp, DependenciesProp->ContainerPtrToValuePtr<void>(PulseRebarCdo));
+
+	UFGSchematicPurchasedDependency* Template = nullptr;
+	for (int32 Index = 0; Index < NobeliskDependencies.Num() && Template == nullptr; ++Index)
+	{
+		Template = Cast<UFGSchematicPurchasedDependency>(DependencyElementProp->GetObjectPropertyValue(NobeliskDependencies.GetRawPtr(Index)));
+	}
+	if (Template == nullptr)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("The Pulse Nobelisk schematic has no schematic-purchased dependency to copy; the Pulse Rebar won't require the Pulse Nobelisk."));
+		return;
+	}
+
+	UFGSchematicPurchasedDependency* Dependency = DuplicateObject<UFGSchematicPurchasedDependency>(Template, PulseRebarCdo);
+	FScriptArrayHelper Schematics(SchematicsProp, SchematicsProp->ContainerPtrToValuePtr<void>(Dependency));
+	Schematics.EmptyValues();
+	Schematics.AddValue();
+	SchematicElementProp->SetObjectPropertyValue(Schematics.GetRawPtr(0), PulseNobeliskSchematicClass);
+
+	// Replace rather than append: this runs on every world load, and the CDO lives for the
+	// whole process.
+	RebarDependencies.EmptyValues();
+	RebarDependencies.AddValue();
+	DependencyElementProp->SetObjectPropertyValue(RebarDependencies.GetRawPtr(0), Dependency);
+
+	UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Rebar schematic now requires %s (dependency class %s)."),
+		*PulseNobeliskSchematicClass->GetName(), *Dependency->GetClass()->GetName());
+}
 } // namespace
 
 UNobeliskPlusWorldModule::UNobeliskPlusWorldModule()
@@ -140,6 +252,8 @@ void UNobeliskPlusWorldModule::AddPulseRebarNodeToQuartzTree()
 		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not load the Quartz tree and/or the Pulse Nobelisk/Pulse Rebar schematics; the Pulse Rebar won't be researchable."));
 		return;
 	}
+
+	RequirePulseNobeliskForPulseRebar(PulseNobeliskSchematicClass, PulseRebarSchematicClass);
 
 	TArray<UFGResearchTreeNode*> Nodes = UFGResearchTree::GetNodes(QuartzTreeClass);
 
@@ -182,8 +296,16 @@ void UNobeliskPlusWorldModule::AddPulseRebarNodeToQuartzTree()
 	NewNodeAccessor.SetSchematic(PulseRebarSchematicClass);
 	NewNodeAccessor.OffsetCoordinatesX(1); // place one column after it
 
+	// The duplicate also inherited the Pulse Nobelisk's visibility links, so it was revealed by
+	// whatever reveals the Pulse Nobelisk instead of by the Pulse Nobelisk itself. Re-link it:
+	// hidden until the Pulse Nobelisk is researched, and revealing nothing of its own.
+	NewNodeAccessor.SetCoordinatesArray(TEXT("UnhiddenBy"), &PulseNobeliskAccessor);
+	NewNodeAccessor.SetCoordinatesArray(TEXT("NodesToUnhide"), nullptr);
+	NewNodeAccessor.ClearChildrenAndRoads();
+	PulseNobeliskAccessor.AddToCoordinatesArray(TEXT("NodesToUnhide"), NewNodeAccessor);
+
 	Nodes.Add(NewNode);
 	UFGResearchTree::SetNodes(QuartzTreeClass, Nodes);
 
-	UE_LOG(LogNobeliskPlus, Log, TEXT("Added the Pulse Rebar research node to the Quartz tree, after the Pulse Nobelisk node."));
+	UE_LOG(LogNobeliskPlus, Log, TEXT("Added the Pulse Rebar research node to the Quartz tree, after the Pulse Nobelisk node, unhidden by it."));
 }

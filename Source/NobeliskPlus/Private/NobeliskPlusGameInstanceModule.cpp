@@ -56,6 +56,13 @@ constexpr const TCHAR* PulseRebarMagazineMaterialPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Material/MI_RebarStun_01.MI_RebarStun_01");
 constexpr const TCHAR* PulseRebarMagazineMaterial1pPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Material/MI_RebarStun_01_1p.MI_RebarStun_01_1p");
+// The Pulse Nobelisk's explosion VFX, found by listing the shipped FactoryGame pak
+// (UnrealPak <pak>.utoc -List). Every runtime discovery route below comes up empty in a
+// cooked build: the CDO has no such property, ScriptAndPropertyObjectReferences is empty, and
+// the runtime asset registry has no dependency data. So load it by path, and keep discovery
+// only as a fallback in case a game update moves the asset.
+constexpr const TCHAR* PulseNobeliskImpactEffectPath =
+	TEXT("/Game/FactoryGame/VFX/Equipment/Weapons/Nobelisk/NS_ShockwaveNobelisk_01.NS_ShockwaveNobelisk_01");
 constexpr const TCHAR* RebarProjectileMeshPath =
 	TEXT("/Game/FactoryGame/Equipment/RebarGun/Mesh/Rebar_static_01.Rebar_static_01");
 constexpr const TCHAR* RebarGunEquipmentPath =
@@ -560,8 +567,17 @@ void UNobeliskPlusGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase pha
 	{
 		UClass* nobeliskClass = StaticLoadClass(AActor::StaticClass(), nullptr, PulseNobeliskProjectilePath);
 		ANobeliskPlusPulseRebarProjectile::ImpactEffect = nullptr;
-		ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = nullptr;
-		if (nobeliskClass != nullptr)
+		ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = LoadObject<UNiagaraSystem>(nullptr, PulseNobeliskImpactEffectPath);
+		if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect != nullptr)
+		{
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Loaded the Pulse Nobelisk's impact effect from its known path: %s"), PulseNobeliskImpactEffectPath);
+		}
+		else
+		{
+			UE_LOG(LogNobeliskPlus, Warning, TEXT("Could not load %s; falling back to searching the Pulse Nobelisk for its impact effect."), PulseNobeliskImpactEffectPath);
+		}
+
+		if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect == nullptr && nobeliskClass != nullptr)
 		{
 			ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect = Cast<UNiagaraSystem>(FindAssetPropertyValue(nobeliskClass, UNiagaraSystem::StaticClass()));
 			if (ANobeliskPlusPulseRebarProjectile::ImpactNiagaraEffect == nullptr)

@@ -46,9 +46,9 @@ public:
 	/// the launch. Does not apply to the player.
 	static float PulseStunDuration;
 
-	/// Discovered once at startup by scanning BP_NobeliskShockwave_C's class hierarchy for
-	/// any UParticleSystem/UNiagaraSystem asset reference - see
-	/// FindImpactEffect in the .cpp. Both null if nothing was found, in which case no VFX is
+	/// Set once at startup by UNobeliskPlusGameInstanceModule: loaded from the Pulse Nobelisk's
+	/// known effect path, falling back to scanning BP_NobeliskShockwave_C for any
+	/// UParticleSystem/UNiagaraSystem reference. Both null if nothing was found, in which case no VFX is
 	/// spawned (silently - this is a cosmetic best-effort, not something that should ever
 	/// crash or block the actual push). At most one of the two is ever set.
 	static UParticleSystem* ImpactEffect;
