@@ -80,7 +80,22 @@ struct FNodeDataStructAccessor
 		return CoordProp->ContainerPtrToValuePtr<void>(NodeDataPtr);
 	}
 
-	void OffsetCoordinatesX(int32 DeltaX) const
+	bool GetCoordinates(int32& OutX, int32& OutY) const
+	{
+		UScriptStruct* CoordStructType = nullptr;
+		void* CoordPtr = GetCoordinatesPtr(&CoordStructType);
+		FIntProperty* XProp = CoordPtr != nullptr ? FindPropertyByShortName<FIntProperty>(CoordStructType, TEXT("X")) : nullptr;
+		FIntProperty* YProp = CoordPtr != nullptr ? FindPropertyByShortName<FIntProperty>(CoordStructType, TEXT("Y")) : nullptr;
+		if (XProp == nullptr || YProp == nullptr)
+		{
+			return false;
+		}
+		OutX = XProp->GetPropertyValue(XProp->ContainerPtrToValuePtr<void>(CoordPtr));
+		OutY = YProp->GetPropertyValue(YProp->ContainerPtrToValuePtr<void>(CoordPtr));
+		return true;
+	}
+
+	void SetCoordinates(int32 X, int32 Y) const
 	{
 		UScriptStruct* CoordStructType = nullptr;
 		void* CoordPtr = GetCoordinatesPtr(&CoordStructType);
@@ -90,8 +105,11 @@ struct FNodeDataStructAccessor
 		}
 		if (FIntProperty* XProp = FindPropertyByShortName<FIntProperty>(CoordStructType, TEXT("X")))
 		{
-			const int32 CurrentX = XProp->GetPropertyValue(XProp->ContainerPtrToValuePtr<void>(CoordPtr));
-			XProp->SetPropertyValue(XProp->ContainerPtrToValuePtr<void>(CoordPtr), CurrentX + DeltaX);
+			XProp->SetPropertyValue(XProp->ContainerPtrToValuePtr<void>(CoordPtr), X);
+		}
+		if (FIntProperty* YProp = FindPropertyByShortName<FIntProperty>(CoordStructType, TEXT("Y")))
+		{
+			YProp->SetPropertyValue(YProp->ContainerPtrToValuePtr<void>(CoordPtr), Y);
 		}
 	}
 
@@ -290,11 +308,62 @@ void UNobeliskPlusWorldModule::AddPulseRebarNodeToQuartzTree()
 		return;
 	}
 
+	int32 ParentX = 0;
+	int32 ParentY = 0;
+	if (!PulseNobeliskAccessor.GetCoordinates(ParentX, ParentY))
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("Could not read the Pulse Nobelisk node's coordinates; the Pulse Rebar won't be researchable."));
+		return;
+	}
+
+	// The MAM keys nodes by grid cell, so a node dropped onto an occupied cell hides the vanilla
+	// node already there. That vanilla research can then never be done, and the tree never shows
+	// as completed. Record every occupied cell (logged, so the layout can be checked) and pick a
+	// free one next to the Pulse Nobelisk.
+	TSet<FIntPoint> OccupiedCells;
+	for (UFGResearchTreeNode* Node : Nodes)
+	{
+		if (Node == nullptr)
+		{
+			continue;
+		}
+		int32 X = 0;
+		int32 Y = 0;
+		if (FNodeDataStructAccessor::ForNode(Node).GetCoordinates(X, Y))
+		{
+			OccupiedCells.Add(FIntPoint(X, Y));
+			const UClass* Schematic = Node->GetNodeSchematic();
+			UE_LOG(LogNobeliskPlus, Log, TEXT("Quartz tree node (%d, %d): %s"), X, Y, Schematic != nullptr ? *Schematic->GetName() : TEXT("<none>"));
+		}
+	}
+
+	FIntPoint Cell(ParentX + 1, ParentY);
+	bool bFoundFreeCell = !OccupiedCells.Contains(Cell);
+	for (int32 DeltaX = 1; DeltaX <= 3 && !bFoundFreeCell; ++DeltaX)
+	{
+		for (const int32 DeltaY : {0, 1, -1, 2, -2, 3, -3})
+		{
+			Cell = FIntPoint(ParentX + DeltaX, ParentY + DeltaY);
+			if (!OccupiedCells.Contains(Cell))
+			{
+				bFoundFreeCell = true;
+				break;
+			}
+		}
+	}
+	if (!bFoundFreeCell)
+	{
+		UE_LOG(LogNobeliskPlus, Error, TEXT("No free cell near the Pulse Nobelisk node at (%d, %d); the Pulse Rebar won't be researchable."), ParentX, ParentY);
+		return;
+	}
+
 	UFGResearchTreeNode* NewNode = DuplicateObject<UFGResearchTreeNode>(PulseNobeliskNode, PulseNobeliskNode->GetOuter());
 	const FNodeDataStructAccessor NewNodeAccessor = FNodeDataStructAccessor::ForNode(NewNode);
 	NewNodeAccessor.SetSingleParent(PulseNobeliskAccessor); // depend on the (still-unmodified) Pulse Nobelisk node
 	NewNodeAccessor.SetSchematic(PulseRebarSchematicClass);
-	NewNodeAccessor.OffsetCoordinatesX(1); // place one column after it
+	NewNodeAccessor.SetCoordinates(Cell.X, Cell.Y);
+	UE_LOG(LogNobeliskPlus, Log, TEXT("Pulse Nobelisk node is at (%d, %d); placing the Pulse Rebar node at (%d, %d)%s."),
+		ParentX, ParentY, Cell.X, Cell.Y, Cell == FIntPoint(ParentX + 1, ParentY) ? TEXT("") : TEXT(" because the cell to its right is taken"));
 
 	// The duplicate also inherited the Pulse Nobelisk's visibility links, so it was revealed by
 	// whatever reveals the Pulse Nobelisk instead of by the Pulse Nobelisk itself. Re-link it:

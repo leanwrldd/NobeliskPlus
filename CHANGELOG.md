@@ -2,6 +2,15 @@
 
 All notable changes to Nobelisk Plus, since the 1.0 release.
 
+## 1.0.5
+
+### Fixed
+- Pulse Rebar research could hide a vanilla Quartz tree node. Its node was
+  always placed one column right of the Pulse Nobelisk, and if that grid cell
+  was already taken the vanilla research there disappeared, so it could never
+  be done and the tree never showed as completed. The node now goes in the
+  first free cell next to the Pulse Nobelisk.
+
 ## 1.0.4
 
 ### Fixed
